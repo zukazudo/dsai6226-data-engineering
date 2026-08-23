@@ -1,0 +1,14 @@
+# Normalise line endings for text the team edits.
+* text=auto eol=lf
+
+# Source data and deliverables must stay byte-identical across checkouts.
+# Without this, git rewrites CRLF in adult.csv and the file differs per platform.
+*.csv   -text
+*.docx  binary
+*.xlsx  binary
+*.pdf   binary
+*.parquet binary
+*.duckdb  binary
+
+# Notebooks are JSON. Keep them diffable but do not let git touch embedded output.
+*.ipynb text eol=lf

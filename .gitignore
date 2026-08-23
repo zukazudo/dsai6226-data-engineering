@@ -1,0 +1,24 @@
+# Working notes and assistant files. Not part of the coursework.
+.claude/
+LAB TASKS/
+LAB_1/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Local databases and build output produced by later labs
+*.duckdb
+*.duckdb.wal
+*.parquet
+warehouse/
+
+# OS and editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
