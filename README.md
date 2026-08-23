@@ -312,6 +312,25 @@ so its columns are far more repetitive than real data and compress better than r
 The scaled rows are included for query time. For storage, the honest number is the native one:
 0.3 MB against 5.3 MB, roughly seventeen times smaller.
 
+### Does it reproduce?
+
+The benchmark was run a second time on different hardware, inside Colab, with PostgreSQL 14
+instead of 16. The ranking of the three engines held. The ordering of two of them did not.
+
+| Run | Rows | CSV + pandas | PostgreSQL | DuckDB + Parquet |
+|---|---:|---:|---:|---:|
+| Local, PostgreSQL 16.14 | 3,256,100 | 1,450.6 ms | 1,263.0 ms | 125.1 ms |
+| Colab, PostgreSQL 14.24 | 1,628,050 | 551.9 ms | 760.2 ms | 107.5 ms |
+
+PostgreSQL beat pandas on the local run and lost to it on the Colab run. Three things differ
+between those rows at once, being the row count, the PostgreSQL version and the machine, so
+the flip cannot be pinned on any one of them without further work. That is the point worth
+taking from it: the gap between pandas and PostgreSQL on this query is small enough to invert
+when the environment changes, so neither result should be quoted as a fact about the engines.
+
+DuckDB with Parquet was between four and ten times faster than the next engine in both
+environments, and that is the finding the verdict rests on.
+
 ### Verdict
 
 At 32,561 rows every engine answers in under 50 milliseconds, so for this dataset as it stands
