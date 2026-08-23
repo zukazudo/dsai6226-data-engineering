@@ -244,6 +244,14 @@ To start over from an empty database:
 python scripts/ingest.py --reset
 ```
 
+## Presentation
+
+[`presentations/Team_E_Labs_1_to_3.pptx`](presentations/Team_E_Labs_1_to_3.pptx)
+
+Sixteen slides covering Labs 1 to 3 as one argument: three defects found, then the two
+decisions that close them. Section dividers mark the lab boundaries. Speaker notes are on
+every slide.
+
 ## Reproducing the Lab 1 figures
 
 ```bash
@@ -258,6 +266,7 @@ Requires pandas. Developed against Python 3.14 and pandas 3.0.3.
 data/         source data, unmodified
 docs/         lab deliverables
 notebooks/    exploratory analysis
+presentations/ slide decks
 scripts/      the ingester
 sql/          schema and queries
 tests/        fixtures that exercise the reject path
