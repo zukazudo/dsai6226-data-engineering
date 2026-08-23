@@ -1,37 +1,75 @@
 -- ---------------------------------------------------------------------------
 -- 01_staging.sql
 --
--- Lands adult.csv exactly as it arrives. Every column is VARCHAR, so nothing
--- is coerced, rejected or silently altered at the boundary. All cleaning
--- happens on the way out of this table, in 03_load.sql, which means the raw
--- value behind every modelled row stays queryable.
+-- The landing zone and the audit trail. All DDL here is CREATE IF NOT EXISTS,
+-- because the ingester runs this on every invocation and must not destroy
+-- anything it finds.
 --
--- The only change made here is to column names: the source uses dots
--- (education.num, capital.gain), which have to be double-quoted in every
--- statement that touches them. Renaming to snake_case removes a whole class
--- of quoting bugs. No value is modified.
+-- stg_adult holds every column as VARCHAR, so nothing is coerced, rejected or
+-- silently altered at the boundary. Cleaning happens on the way out, in
+-- 03_load.sql, which keeps the raw value behind every modelled row queryable.
+--
+-- The only change made to the source is column naming: the file uses dots
+-- (education.num, capital.gain), which must be double-quoted in every
+-- statement that touches them. Renaming to snake_case removes a class of
+-- quoting bugs. No value is modified.
 -- ---------------------------------------------------------------------------
 
-CREATE OR REPLACE TABLE stg_adult AS
-SELECT
-    CAST(row_number() OVER () AS INTEGER) AS source_row,
-    age,
-    workclass,
-    fnlwgt,
-    education,
-    "education.num"   AS education_num,
-    "marital.status"  AS marital_status,
-    occupation,
-    relationship,
-    race,
-    sex,
-    "capital.gain"    AS capital_gain,
-    "capital.loss"    AS capital_loss,
-    "hours.per.week"  AS hours_per_week,
-    "native.country"  AS native_country,
-    income
-FROM read_csv('data/adult.csv', all_varchar = true, header = true);
+CREATE SEQUENCE IF NOT EXISTS seq_load_run START 1;
 
--- source_row is position in the file as loaded, and is the lineage handle back
--- from any modelled row. DuckDB preserves insertion order by default, so this
--- matches the line order of the CSV.
+-- Every invocation of the ingester writes one row here. This is the auditable
+-- lineage the Lab 1 statement said the dataset did not have.
+CREATE TABLE IF NOT EXISTS load_run (
+    load_run_id     INTEGER     PRIMARY KEY,
+    started_at      TIMESTAMP   NOT NULL,
+    finished_at     TIMESTAMP,
+    source_file     VARCHAR     NOT NULL,
+    source_sha256   VARCHAR     NOT NULL,
+    source_bytes    BIGINT      NOT NULL,
+    rows_read       INTEGER,
+    rows_staged     INTEGER,
+    rows_rejected   INTEGER,
+    rows_loaded     INTEGER,
+    rows_already_present INTEGER,
+    status          VARCHAR     NOT NULL
+);
+
+-- record_key is what makes the load re-runnable. The source has no identifier,
+-- so identity is manufactured from content: an md5 of all 15 source fields,
+-- suffixed with the occurrence number of that exact content within the file.
+-- The 24 duplicate rows therefore get distinct keys (#1, #2, #3) instead of
+-- colliding, and re-reading the same file reproduces exactly the same keys.
+CREATE TABLE IF NOT EXISTS stg_adult (
+    record_key      VARCHAR     PRIMARY KEY,
+    load_run_id     INTEGER     NOT NULL,
+    source_file     VARCHAR     NOT NULL,
+    source_row      INTEGER     NOT NULL,
+
+    age             VARCHAR,
+    workclass       VARCHAR,
+    fnlwgt          VARCHAR,
+    education       VARCHAR,
+    education_num   VARCHAR,
+    marital_status  VARCHAR,
+    occupation      VARCHAR,
+    relationship    VARCHAR,
+    race            VARCHAR,
+    sex             VARCHAR,
+    capital_gain    VARCHAR,
+    capital_loss    VARCHAR,
+    hours_per_week  VARCHAR,
+    native_country  VARCHAR,
+    income          VARCHAR
+);
+
+-- Rows that failed validation, with the reason. Queryable rather than only
+-- printed, so a rejected row can be investigated after the run.
+CREATE TABLE IF NOT EXISTS load_reject (
+    load_run_id     INTEGER     NOT NULL,
+    record_key      VARCHAR     NOT NULL,
+    source_file     VARCHAR     NOT NULL,
+    source_row      INTEGER     NOT NULL,
+    reason          VARCHAR     NOT NULL,
+    detail          VARCHAR,
+    PRIMARY KEY (record_key, reason)
+);

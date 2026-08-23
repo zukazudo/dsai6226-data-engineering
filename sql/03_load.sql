@@ -1,169 +1,235 @@
 -- ---------------------------------------------------------------------------
 -- 03_load.sql
 --
--- Transforms stg_adult into the star. This is where every Lab 1 finding is
--- acted on, and it is the only place cleaning happens.
+-- Transforms staged rows into the star. Every statement here is idempotent:
+-- run it twice and the second run inserts nothing. This is where every Lab 1
+-- finding is acted on, and it is the only place cleaning happens.
+--
+-- The ingester substitutes the current run id for $run_id before executing.
 -- ---------------------------------------------------------------------------
 
-DELETE FROM fact_person;
-DELETE FROM dim_workclass;
-DELETE FROM dim_education;
-DELETE FROM dim_marital_status;
-DELETE FROM dim_occupation;
-DELETE FROM dim_relationship;
-DELETE FROM dim_race;
-DELETE FROM dim_sex;
-DELETE FROM dim_native_country;
+-- ------------------------------------------------------------ 1. validation
+-- Rows that fail any rule are recorded with the reason and excluded from the
+-- fact load. A row can fail more than one rule and gets one reject row per
+-- reason, which is why the primary key is (record_key, reason).
+--
+-- The rules reject rows that are malformed. They do not reject rows that are
+-- merely odd. The three records contradicting themselves on sex and
+-- relationship, and the 2,399 records carrying '?', are real observations and
+-- load normally.
 
--- --------------------------------------------------------- dimension loads
--- Surrogate key -1 is 'Unknown' in every dimension. Real members are numbered
--- from 1 in alphabetical order so the keys are stable across rebuilds.
-
-INSERT INTO dim_workclass (workclass_sk, workclass, is_unknown)
-SELECT -1, 'Unknown', TRUE
-UNION ALL
-SELECT CAST(row_number() OVER (ORDER BY workclass) AS INTEGER), workclass, FALSE
-FROM (SELECT DISTINCT workclass FROM stg_adult WHERE workclass <> '?');
-
-INSERT INTO dim_education (education_sk, education, education_num, education_group)
-SELECT
-    CAST(row_number() OVER (ORDER BY education_num) AS INTEGER),
-    education,
-    education_num,
-    CASE
-        WHEN education_num <= 8  THEN 'No high school diploma'
-        WHEN education_num  = 9  THEN 'High school graduate'
-        WHEN education_num = 10  THEN 'Some college'
-        WHEN education_num IN (11, 12) THEN 'Associate degree'
-        WHEN education_num = 13  THEN 'Bachelors degree'
-        ELSE 'Postgraduate'
-    END
+INSERT INTO load_reject (load_run_id, record_key, source_file, source_row, reason, detail)
+SELECT $run_id, record_key, source_file, source_row, reason, detail
 FROM (
-    SELECT DISTINCT education, CAST(education_num AS SMALLINT) AS education_num
+    SELECT record_key, source_file, source_row, 'age_not_an_integer' AS reason,
+           'age = ' || coalesce(age, 'NULL') AS detail
+    FROM stg_adult WHERE try_cast(age AS INTEGER) IS NULL
+
+    UNION ALL
+    SELECT record_key, source_file, source_row, 'age_out_of_range',
+           'age = ' || age
     FROM stg_adult
+    WHERE try_cast(age AS INTEGER) IS NOT NULL
+      AND try_cast(age AS INTEGER) NOT BETWEEN 1 AND 120
+
+    UNION ALL
+    SELECT record_key, source_file, source_row, 'fnlwgt_not_a_positive_integer',
+           'fnlwgt = ' || coalesce(fnlwgt, 'NULL')
+    FROM stg_adult
+    WHERE try_cast(fnlwgt AS BIGINT) IS NULL OR try_cast(fnlwgt AS BIGINT) <= 0
+
+    UNION ALL
+    SELECT record_key, source_file, source_row, 'hours_per_week_out_of_range',
+           'hours.per.week = ' || coalesce(hours_per_week, 'NULL')
+    FROM stg_adult
+    WHERE try_cast(hours_per_week AS INTEGER) IS NULL
+       OR try_cast(hours_per_week AS INTEGER) NOT BETWEEN 1 AND 99
+
+    UNION ALL
+    SELECT record_key, source_file, source_row, 'capital_value_invalid',
+           'gain = ' || coalesce(capital_gain, 'NULL') || ', loss = ' || coalesce(capital_loss, 'NULL')
+    FROM stg_adult
+    WHERE try_cast(capital_gain AS INTEGER) IS NULL
+       OR try_cast(capital_loss AS INTEGER) IS NULL
+       OR try_cast(capital_gain AS INTEGER) < 0
+       OR try_cast(capital_loss AS INTEGER) < 0
+
+    UNION ALL
+    SELECT record_key, source_file, source_row, 'income_not_recognised',
+           'income = ' || coalesce(income, 'NULL')
+    FROM stg_adult WHERE income NOT IN ('<=50K', '>50K') OR income IS NULL
+
+    UNION ALL
+    SELECT record_key, source_file, source_row, 'sex_not_recognised',
+           'sex = ' || coalesce(sex, 'NULL')
+    FROM stg_adult WHERE sex NOT IN ('Male', 'Female') OR sex IS NULL
+
+    -- The education ladder is seeded in 02_schema.sql, so a pair the reference
+    -- does not contain is a genuine integrity failure and not a new category.
+    UNION ALL
+    SELECT s.record_key, s.source_file, s.source_row, 'education_mapping_mismatch',
+           'education = ' || coalesce(s.education, 'NULL') ||
+           ', education.num = ' || coalesce(s.education_num, 'NULL')
+    FROM stg_adult s
+    WHERE NOT EXISTS (
+        SELECT 1 FROM dim_education d
+        WHERE d.education = s.education
+          AND d.education_num = try_cast(s.education_num AS SMALLINT)
+    )
+) v
+WHERE NOT EXISTS (
+    SELECT 1 FROM load_reject r
+    WHERE r.record_key = v.record_key AND r.reason = v.reason
 );
 
-INSERT INTO dim_marital_status (marital_status_sk, marital_status)
-SELECT CAST(row_number() OVER (ORDER BY marital_status) AS INTEGER), marital_status
-FROM (SELECT DISTINCT marital_status FROM stg_adult);
 
--- occupation carries a third state. '?' means one of two different things and
--- the source file cannot tell them apart on its own: the seven records whose
--- workclass is Never-worked have no occupation to record, everyone else with
--- '?' declined to answer. Splitting them here is the whole argument for a
--- dimension table.
+-- ---------------------------------------------------- 2. dimension upserts
+-- New members only. Existing surrogate keys are never renumbered, so keys
+-- stay stable across runs and any fact row already loaded keeps pointing at
+-- the same member. dim_education is seeded and deliberately not widened here.
+
+INSERT INTO dim_workclass (workclass_sk, workclass, is_unknown)
+SELECT coalesce((SELECT max(workclass_sk) FROM dim_workclass WHERE workclass_sk > 0), 0)
+         + CAST(row_number() OVER (ORDER BY s.workclass) AS INTEGER),
+       s.workclass, FALSE
+FROM (SELECT DISTINCT workclass FROM stg_adult WHERE workclass <> '?' AND workclass IS NOT NULL) s
+WHERE NOT EXISTS (SELECT 1 FROM dim_workclass d WHERE d.workclass = s.workclass);
+
+INSERT INTO dim_marital_status (marital_status_sk, marital_status)
+SELECT coalesce((SELECT max(marital_status_sk) FROM dim_marital_status WHERE marital_status_sk > 0), 0)
+         + CAST(row_number() OVER (ORDER BY s.marital_status) AS INTEGER),
+       s.marital_status
+FROM (SELECT DISTINCT marital_status FROM stg_adult WHERE marital_status IS NOT NULL) s
+WHERE NOT EXISTS (SELECT 1 FROM dim_marital_status d WHERE d.marital_status = s.marital_status);
+
 INSERT INTO dim_occupation (occupation_sk, occupation, is_unknown, is_not_applicable)
-SELECT -1, 'Unknown', TRUE, FALSE
-UNION ALL
-SELECT -2, 'Not applicable', FALSE, TRUE
-UNION ALL
-SELECT CAST(row_number() OVER (ORDER BY occupation) AS INTEGER), occupation, FALSE, FALSE
-FROM (SELECT DISTINCT occupation FROM stg_adult WHERE occupation <> '?');
+SELECT coalesce((SELECT max(occupation_sk) FROM dim_occupation WHERE occupation_sk > 0), 0)
+         + CAST(row_number() OVER (ORDER BY s.occupation) AS INTEGER),
+       s.occupation, FALSE, FALSE
+FROM (SELECT DISTINCT occupation FROM stg_adult WHERE occupation <> '?' AND occupation IS NOT NULL) s
+WHERE NOT EXISTS (SELECT 1 FROM dim_occupation d WHERE d.occupation = s.occupation);
 
 INSERT INTO dim_relationship (relationship_sk, relationship)
-SELECT CAST(row_number() OVER (ORDER BY relationship) AS INTEGER), relationship
-FROM (SELECT DISTINCT relationship FROM stg_adult);
+SELECT coalesce((SELECT max(relationship_sk) FROM dim_relationship WHERE relationship_sk > 0), 0)
+         + CAST(row_number() OVER (ORDER BY s.relationship) AS INTEGER),
+       s.relationship
+FROM (SELECT DISTINCT relationship FROM stg_adult WHERE relationship IS NOT NULL) s
+WHERE NOT EXISTS (SELECT 1 FROM dim_relationship d WHERE d.relationship = s.relationship);
 
 INSERT INTO dim_race (race_sk, race)
-SELECT CAST(row_number() OVER (ORDER BY race) AS INTEGER), race
-FROM (SELECT DISTINCT race FROM stg_adult);
+SELECT coalesce((SELECT max(race_sk) FROM dim_race WHERE race_sk > 0), 0)
+         + CAST(row_number() OVER (ORDER BY s.race) AS INTEGER),
+       s.race
+FROM (SELECT DISTINCT race FROM stg_adult WHERE race IS NOT NULL) s
+WHERE NOT EXISTS (SELECT 1 FROM dim_race d WHERE d.race = s.race);
 
 INSERT INTO dim_sex (sex_sk, sex)
-SELECT CAST(row_number() OVER (ORDER BY sex) AS INTEGER), sex
-FROM (SELECT DISTINCT sex FROM stg_adult);
+SELECT coalesce((SELECT max(sex_sk) FROM dim_sex WHERE sex_sk > 0), 0)
+         + CAST(row_number() OVER (ORDER BY s.sex) AS INTEGER),
+       s.sex
+FROM (SELECT DISTINCT sex FROM stg_adult WHERE sex IN ('Male', 'Female')) s
+WHERE NOT EXISTS (SELECT 1 FROM dim_sex d WHERE d.sex = s.sex);
 
 INSERT INTO dim_native_country (native_country_sk, native_country, is_unknown)
-SELECT -1, 'Unknown', TRUE
-UNION ALL
-SELECT CAST(row_number() OVER (ORDER BY native_country) AS INTEGER), native_country, FALSE
-FROM (SELECT DISTINCT native_country FROM stg_adult WHERE native_country <> '?');
+SELECT coalesce((SELECT max(native_country_sk) FROM dim_native_country WHERE native_country_sk > 0), 0)
+         + CAST(row_number() OVER (ORDER BY s.native_country) AS INTEGER),
+       s.native_country, FALSE
+FROM (SELECT DISTINCT native_country FROM stg_adult WHERE native_country <> '?' AND native_country IS NOT NULL) s
+WHERE NOT EXISTS (SELECT 1 FROM dim_native_country d WHERE d.native_country = s.native_country);
 
--- -------------------------------------------------------------- fact load
+
+-- --------------------------------------------------------- 3. fact insert
+-- The anti-join on record_key at the bottom is what makes this idempotent.
+-- A second run finds every key already present and inserts nothing.
 
 INSERT INTO fact_person
-WITH keyed AS (
-    -- A duplicate is a row identical to another on all 15 source columns.
-    -- source_row is excluded from the hash, since it is ours and not the
-    -- source's.
-    SELECT
-        s.*,
-        md5(concat_ws('|',
-            age, workclass, fnlwgt, education, education_num, marital_status,
-            occupation, relationship, race, sex, capital_gain, capital_loss,
-            hours_per_week, native_country, income)) AS row_hash
+WITH admissible AS (
+    SELECT s.*
     FROM stg_adult s
+    WHERE NOT EXISTS (SELECT 1 FROM load_reject r WHERE r.record_key = s.record_key)
+      AND NOT EXISTS (SELECT 1 FROM fact_person f WHERE f.record_key = s.record_key)
+),
+-- Duplicate groups are computed over everything already modelled plus what is
+-- arriving, so a duplicate spread across two file drops is still recognised.
+universe AS (
+    SELECT record_key, source_row,
+           substr(record_key, 1, 32) AS content_hash
+    FROM admissible
+    UNION ALL
+    SELECT record_key, source_row, substr(record_key, 1, 32)
+    FROM fact_person
 ),
 group_sizes AS (
-    SELECT row_hash, count(*) AS group_size, min(source_row) AS first_row
-    FROM keyed
-    GROUP BY row_hash
+    SELECT content_hash, count(*) AS group_size, min(source_row) AS first_row
+    FROM universe GROUP BY content_hash
 ),
 dup_groups AS (
-    -- Only groups with more than one member get an id, numbered 1..n in order
-    -- of first appearance in the file.
-    SELECT
-        row_hash,
-        CAST(row_number() OVER (ORDER BY first_row) AS INTEGER) AS dup_group
-    FROM group_sizes
-    WHERE group_size > 1
+    SELECT content_hash,
+           CAST(row_number() OVER (ORDER BY first_row) AS INTEGER) AS dup_group
+    FROM group_sizes WHERE group_size > 1
 ),
-grouped AS (
-    SELECT
-        k.*,
-        d.dup_group,
-        CASE WHEN d.dup_group IS NOT NULL
-             THEN CAST(row_number() OVER (PARTITION BY k.row_hash ORDER BY k.source_row) AS SMALLINT)
-        END AS seq_in_group
-    FROM keyed k
-    LEFT JOIN dup_groups d USING (row_hash)
+numbered AS (
+    SELECT a.*,
+           d.dup_group,
+           CASE WHEN d.dup_group IS NOT NULL
+                THEN CAST(row_number() OVER (PARTITION BY substr(a.record_key, 1, 32)
+                                             ORDER BY a.source_row) AS SMALLINT)
+           END AS seq_in_group,
+           CAST(coalesce((SELECT max(person_sk) FROM fact_person), 0)
+                + row_number() OVER (ORDER BY a.source_file, a.source_row) AS BIGINT) AS new_person_sk
+    FROM admissible a
+    LEFT JOIN dup_groups d ON d.content_hash = substr(a.record_key, 1, 32)
 )
 SELECT
-    CAST(g.source_row AS BIGINT)                    AS person_sk,
-    g.source_row,
+    n.new_person_sk,
+    n.record_key,
+    n.load_run_id,
+    n.source_file,
+    n.source_row,
 
-    COALESCE(w.workclass_sk, -1),
+    coalesce(w.workclass_sk, -1),
     e.education_sk,
     ms.marital_status_sk,
     -- '?' with a real workclass of Never-worked is 'Not applicable' (-2).
     -- '?' otherwise is 'Unknown' (-1).
     CASE
-        WHEN g.occupation <> '?'            THEN o.occupation_sk
-        WHEN g.workclass  =  'Never-worked' THEN -2
+        WHEN n.occupation <> '?'            THEN o.occupation_sk
+        WHEN n.workclass  =  'Never-worked' THEN -2
         ELSE -1
-    END                                             AS occupation_sk,
+    END,
     r.relationship_sk,
     ra.race_sk,
     sx.sex_sk,
-    COALESCE(nc.native_country_sk, -1),
+    coalesce(nc.native_country_sk, -1),
 
     -- age 90 is a top code: 43 records sit at 90 and none at 89.
-    CASE WHEN CAST(g.age AS SMALLINT) = 90 THEN NULL ELSE CAST(g.age AS SMALLINT) END,
-    CAST(g.age AS SMALLINT) = 90,
+    CASE WHEN try_cast(n.age AS SMALLINT) = 90 THEN NULL ELSE try_cast(n.age AS SMALLINT) END,
+    try_cast(n.age AS SMALLINT) = 90,
 
     -- hours.per.week 99 is a top code: 85 records at 99 against 11 at 98.
-    CASE WHEN CAST(g.hours_per_week AS SMALLINT) = 99 THEN NULL ELSE CAST(g.hours_per_week AS SMALLINT) END,
-    CAST(g.hours_per_week AS SMALLINT) = 99,
+    CASE WHEN try_cast(n.hours_per_week AS SMALLINT) = 99 THEN NULL ELSE try_cast(n.hours_per_week AS SMALLINT) END,
+    try_cast(n.hours_per_week AS SMALLINT) = 99,
 
     -- capital.gain 99999 is a censoring sentinel: 159 records, next real value
     -- 41,310, and every one of them in the high income bracket.
-    CASE WHEN CAST(g.capital_gain AS INTEGER) = 99999 THEN NULL ELSE CAST(g.capital_gain AS INTEGER) END,
-    CAST(g.capital_gain AS INTEGER) = 99999,
+    CASE WHEN try_cast(n.capital_gain AS INTEGER) = 99999 THEN NULL ELSE try_cast(n.capital_gain AS INTEGER) END,
+    try_cast(n.capital_gain AS INTEGER) = 99999,
 
     -- capital.loss has no sentinel. Its maximum of 4,356 sits in a smooth
     -- distribution, so it loads unaltered.
-    CAST(g.capital_loss AS INTEGER),
+    try_cast(n.capital_loss AS INTEGER),
 
-    CAST(g.fnlwgt AS INTEGER),
-    g.income = '>50K',
+    try_cast(n.fnlwgt AS INTEGER),
+    n.income = '>50K',
 
-    g.dup_group,
-    g.seq_in_group
-FROM grouped g
-LEFT JOIN dim_workclass      w  ON w.workclass           = g.workclass
-JOIN      dim_education      e  ON e.education           = g.education
-JOIN      dim_marital_status ms ON ms.marital_status     = g.marital_status
-LEFT JOIN dim_occupation     o  ON o.occupation          = g.occupation
-JOIN      dim_relationship   r  ON r.relationship        = g.relationship
-JOIN      dim_race           ra ON ra.race               = g.race
-JOIN      dim_sex            sx ON sx.sex                = g.sex
-LEFT JOIN dim_native_country nc ON nc.native_country     = g.native_country;
+    n.dup_group,
+    n.seq_in_group
+FROM numbered n
+LEFT JOIN dim_workclass      w  ON w.workclass       = n.workclass
+JOIN      dim_education      e  ON e.education       = n.education
+JOIN      dim_marital_status ms ON ms.marital_status = n.marital_status
+LEFT JOIN dim_occupation     o  ON o.occupation      = n.occupation
+JOIN      dim_relationship   r  ON r.relationship    = n.relationship
+JOIN      dim_race           ra ON ra.race           = n.race
+JOIN      dim_sex            sx ON sx.sex            = n.sex
+LEFT JOIN dim_native_country nc ON nc.native_country = n.native_country;

@@ -38,17 +38,13 @@ Appendices A to D of the document carry the evidence, the secondary findings, a 
 Deliverable: the SQL schema in [`sql/`](sql/).
 
 ```
-sql/01_staging.sql    land the CSV as raw text, no coercion
-sql/02_schema.sql     the star: one fact table, eight dimensions
-sql/03_load.sql       transform staging into the star, the only place cleaning happens
+sql/01_staging.sql    landing zone and audit tables, all CREATE IF NOT EXISTS
+sql/02_schema.sql     the star: one fact table, eight dimensions, seeded members
+sql/03_load.sql       validate, reject, upsert dimensions, insert facts, all idempotent
 sql/04_query.sql      the allocation query, plus three supporting counts
 ```
 
-Build it and query it in one command each:
-
-```bash
-python scripts/build_warehouse.py
-```
+The schema is built and populated by the Lab 3 ingester. Query it with:
 
 ```bash
 duckdb warehouse/adult.duckdb < sql/04_query.sql
@@ -136,6 +132,118 @@ behind any modelled row stays queryable.
 The load is checked against the Lab 1 figures on every build: row counts, the `?` split, each
 sentinel count, the duplicate groups, and referential integrity on all eight dimensions.
 
+## Lab 3: the re-runnable ingester
+
+Deliverable: [`scripts/ingest.py`](scripts/ingest.py)
+
+Run it in exactly one command:
+
+```bash
+python scripts/ingest.py
+```
+
+That reads `data/adult.csv`, lands it in staging, validates it, and loads what passes into the
+star schema, creating the schema first if it does not exist. Pass a different path to ingest
+another file, or a directory to ingest every `.csv` in it.
+
+### Proof of idempotency
+
+Running it a second time changes nothing. The row count is unchanged and no work is repeated:
+
+```
+run 1: adult.csv (4,104,734 bytes, sha256 250e154ed757)
+  rows read 32561
+  staged    32561  (0 already present from an earlier run)
+  rejected      0
+  loaded    32561
+  fact_person now holds 32,561 rows
+
+run 2: adult.csv (4,104,734 bytes, sha256 250e154ed757)
+  rows read 32561
+  staged        0  (32561 already present from an earlier run)
+  rejected      0
+  loaded        0
+  fact_person now holds 32,561 rows
+```
+
+Every run is also recorded in the `load_run` table, so the proof survives the terminal
+scrollback. `python scripts/ingest.py --summary` prints it:
+
+| run | source | read | staged | rejected | loaded | status |
+|---|---|---|---|---|---|---|
+| 1 | adult.csv | 32561 | 32561 | 0 | 32561 | ok |
+| 2 | adult.csv | 32561 | 0 | 0 | 0 | ok |
+
+### How the idempotency actually works
+
+The source has no identifier of any kind, which was the third defect in the Lab 1 statement,
+so there is nothing to match an incoming row against. The ingester manufactures identity from
+content. `record_key` is an md5 of all 15 source fields, suffixed with the occurrence number
+of that exact content within the file:
+
+```
+0f1eb4dcb00ec0cf9f76e1b0e60cbb95#1
+```
+
+Re-reading the same file reproduces exactly the same keys, so the insert finds them already
+present and does nothing. The occurrence suffix is what lets the 24 known duplicate rows
+survive: three identical records become `#1`, `#2` and `#3` instead of collapsing into one.
+
+The limitation is worth stating plainly. Two genuinely different people who match on all 15
+attributes are indistinguishable to this scheme, exactly as they were indistinguishable to
+Lab 1. The ingester inherits that ambiguity from the source and does not pretend to resolve it.
+
+### What it logs
+
+Rows read, rows staged, rows rejected with the reason for each, and rows loaded. Rejects go to
+the `load_reject` table as well as the console, so a rejected row can be investigated after the
+run rather than only read in a log.
+
+Eight validation rules are enforced. They reject rows that are **malformed**, not rows that are
+merely **odd**: the 2,399 records carrying `?` and the three records contradicting themselves
+on sex and relationship are real observations and load normally.
+
+`tests/fixtures/adult_bad_rows.csv` is a nine-row file that triggers every rule once, so the
+reject path is demonstrated rather than assumed:
+
+```bash
+python scripts/ingest.py tests/fixtures/adult_bad_rows.csv
+```
+
+```
+rows read     9
+staged        9
+rejected      8, by reason:
+    age_not_an_integer               1   e.g. age = abc
+    age_out_of_range                 1   e.g. age = 201
+    fnlwgt_not_a_positive_integer    1   e.g. fnlwgt = -5
+    hours_per_week_out_of_range      1   e.g. hours.per.week = 0
+    capital_value_invalid            1   e.g. gain = -100, loss = 0
+    income_not_recognised            1   e.g. income = 50K+
+    sex_not_recognised               1   e.g. sex = Unknown
+    education_mapping_mismatch       1   e.g. education = HS-grad, education.num = 12
+loaded        1
+```
+
+One row is valid and loads, eight are rejected. The `education_mapping_mismatch` rule is worth
+noting: `dim_education` is seeded with the canonical 16-level ladder rather than inferred from
+the data, so it can serve as the reference an incoming pair is checked against. A file claiming
+`HS-grad` at level 12 is rejected instead of quietly widening the dimension.
+
+### Lineage
+
+`fact_person` carries `load_run_id`, `source_file` and `source_row`, and `load_run` records the
+sha256 and byte count of every file ingested. Any row in the warehouse can be traced back to
+the exact line of the exact file that produced it, and forward to the run that admitted it.
+Lab 1 concluded that a decision spending public money had no auditable lineage. This is the
+part that fixes it.
+
+To start over from an empty database:
+
+```bash
+python scripts/ingest.py --reset
+```
+
 ## Reproducing the Lab 1 figures
 
 ```bash
@@ -150,15 +258,10 @@ Requires pandas. Developed against Python 3.14 and pandas 3.0.3.
 data/         source data, unmodified
 docs/         lab deliverables
 notebooks/    exploratory analysis
-scripts/      build and load tooling
+scripts/      the ingester
 sql/          schema and queries
+tests/        fixtures that exercise the reject path
 warehouse/    generated DuckDB file, not committed
 ```
 
-## Conventions
 
-Lab deliverables are Word documents under `docs/`. This README is the only Markdown file in
-the repository.
-
-DuckDB is the engine for the project. Lab 4 additionally benchmarks PostgreSQL because the
-exercise requires the comparison, and that container is not a dependency of anything else here.
