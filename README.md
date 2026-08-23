@@ -100,7 +100,7 @@ anyway has nothing to do with performance:
   write NULL and destroy a real value for the seven `Never-worked` records. A dimension has a
   row for each state.
 - **A flat table cannot hold the duplicate decision.** Retaining rows while marking them
-  requires columns that describe the record rather than the person. Those belong beside the
+  requires columns that describe the record, not the person. Those belong beside the
   surrogate key, which a flat file does not have.
 - **`education` and `education.num` are redundant in every one of the 32,561 rows**, and
   nothing stops them drifting apart. In `dim_education` the pairing is asserted once and
@@ -197,7 +197,7 @@ Lab 1. The ingester inherits that ambiguity from the source and does not pretend
 
 Rows read, rows staged, rows rejected with the reason for each, and rows loaded. Rejects go to
 the `load_reject` table as well as the console, so a rejected row can be investigated after the
-run rather than only read in a log.
+run, and not only read in a log.
 
 Eight validation rules are enforced. They reject rows that are **malformed**, not rows that are
 merely **odd**: the 2,399 records carrying `?` and the three records contradicting themselves
@@ -226,7 +226,7 @@ loaded        1
 ```
 
 One row is valid and loads, eight are rejected. The `education_mapping_mismatch` rule is worth
-noting: `dim_education` is seeded with the canonical 16-level ladder rather than inferred from
+noting: `dim_education` is seeded with the canonical 16-level ladder and not inferred from
 the data, so it can serve as the reference an incoming pair is checked against. A file claiming
 `HS-grad` at level 12 is rejected instead of quietly widening the dimension.
 
@@ -251,6 +251,76 @@ python scripts/ingest.py --reset
 Sixteen slides covering Labs 1 to 3 as one argument: three defects found, then the two
 decisions that close them. Section dividers mark the lab boundaries. Speaker notes are on
 every slide.
+
+## Lab 4: benchmark, do not believe
+
+Deliverable: the table and verdict below. Reproduce with
+[`scripts/benchmark.py`](scripts/benchmark.py).
+
+```bash
+python scripts/benchmark.py
+```
+
+PostgreSQL runs in a throwaway container. Nothing else in this repository depends on it:
+
+```bash
+docker run -d --name dsai6226-pg -e POSTGRES_PASSWORD=labpass -e POSTGRES_USER=lab -e POSTGRES_DB=adult -p 55432:5432 postgres:16-alpine
+```
+
+### The comparison
+
+One aggregate query, the allocation question from Lab 1, run against identical data in three
+places. 32,561 rows is the real dataset. The 3.3 million row copy is included because at the
+native size the numbers say more about process startup than about the engines.
+
+**Native, 32,561 rows**
+
+| Engine | Stored size | One-off load | Query | Query including read |
+|---|---:|---:|---:|---:|
+| CSV + pandas | 5.3 MB | n/a | 44.8 ms | 357 ms |
+| PostgreSQL 16 | 6.5 MB | 1,165 ms | 35.8 ms | n/a |
+| DuckDB + Parquet | 0.3 MB | n/a | **17.2 ms** | n/a |
+
+**Scaled, 3,256,100 rows**
+
+| Engine | Stored size | One-off load | Query | Query including read |
+|---|---:|---:|---:|---:|
+| CSV + pandas | 545.5 MB | n/a | 1,450.6 ms | 30,373 ms |
+| PostgreSQL 16 | 602.7 MB | 85,017 ms | 1,263.0 ms | n/a |
+| DuckDB + Parquet | 14.6 MB | n/a | **125.1 ms** | n/a |
+
+Median of 7 runs after a warm-up, on an AMD Ryzen 5 PRO 5650U, 12 threads, 15.3 GB RAM,
+Windows 11, Python 3.14.5, DuckDB 1.5.5, pandas 3.0.3, PostgreSQL 16.14 in Docker.
+
+### How the numbers were kept honest
+
+**All three engines see identical data.** Benchmarking the raw `adult.csv` against the cleaned
+warehouse would compare different numbers. The denormalised `analytic_person` table is written
+once to CSV, Parquet and PostgreSQL, so every engine answers the same question.
+
+**The script asserts the three answers match before reporting any timing.** All three return
+the same 87 groups with the same counts and means. A timing from an engine that computed a
+different answer would be worthless, and this is the check that catches it.
+
+**Load cost is separated from query cost.** pandas pays the read on every single run, which is
+the 357 ms and 30 second columns. PostgreSQL and DuckDB pay it once. Reporting only per-query
+time flatters pandas; reporting only total time flatters the databases. Both are shown.
+
+**The scaled storage figures overstate the Parquet advantage and should not be quoted.** The
+larger table is the real one replicated 100 times, with only `person_sk` and `fnlwgt` varied,
+so its columns are far more repetitive than real data and compress better than real data would.
+The scaled rows are included for query time. For storage, the honest number is the native one:
+0.3 MB against 5.3 MB, roughly seventeen times smaller.
+
+### Verdict
+
+At 32,561 rows every engine answers in under 50 milliseconds, so for this dataset as it stands
+today speed is not what decides the question. We would still choose DuckDB with Parquet,
+because it is the fastest of the three at both sizes, the file is seventeen times smaller than
+the CSV, and it needs no server running before anyone can ask a question. PostgreSQL earns its
+1.2 second load and its extra disk only when several people write at once and the data has to
+survive a crash, and neither is true of a coursework warehouse that one analyst rebuilds from
+a clone in seconds.
 
 ## Reproducing the Lab 1 figures
 
