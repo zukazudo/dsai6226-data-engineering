@@ -1,0 +1,28 @@
+# The PostgreSQL instance the Lab 4 benchmark measures.
+#
+#     docker compose up -d
+#     python scripts/benchmark.py
+#     docker compose down -v
+#
+# Nothing else in the project depends on this container, so it only needs to be
+# running while benchmarking. The port is 55432 rather than the default, to stay
+# clear of any PostgreSQL already installed on the machine.
+#
+# The credentials are throwaway and match the default DSN in scripts/benchmark.py.
+# Override with --pg-dsn if you change them.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: dsai6226-pg
+    environment:
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: labpass
+      POSTGRES_DB: adult
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lab -d adult"]
+      interval: 3s
+      timeout: 3s
+      retries: 10

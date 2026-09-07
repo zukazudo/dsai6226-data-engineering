@@ -1,0 +1,15 @@
+# Everything needed to build the warehouse and run the benchmark.
+#
+#     pip install -r requirements.txt
+#
+# The versions are the ones the figures in the README were produced with. The
+# scripts do not depend on these exact releases, but pinning them means that a
+# rerun disagreeing with the recorded numbers is a real difference and not
+# version drift.
+
+duckdb==1.5.5            # warehouse engine, and the Parquet reader in Lab 4
+pandas==3.0.3            # the Lab 1 checks, and the CSV leg of the Lab 4 benchmark
+psycopg[binary]==3.3.4   # Lab 4 only, for the PostgreSQL leg of the benchmark
+
+# Deliberately absent: pyarrow. Parquet needs no separate library here, because
+# DuckDB reads and writes it directly.

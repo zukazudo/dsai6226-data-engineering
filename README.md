@@ -13,6 +13,16 @@ The file is committed here so that every result in this repository can be reprod
 clone without a Kaggle account. It is the unmodified original, and no cleaning has been
 applied to it.
 
+## Setting up
+
+```bash
+pip install -r requirements.txt
+```
+
+Three packages: DuckDB, pandas and psycopg. The last is used only by the Lab 4 benchmark, so
+the pipeline itself runs without it. Parquet needs no separate library, because DuckDB reads
+and writes it directly.
+
 ## Lab 1: data problem statement
 
 Deliverable: [`docs/Team_E_Lab1_Data_Problem_Statement.docx`](docs/Team_E_Lab1_Data_Problem_Statement.docx)
@@ -261,11 +271,15 @@ Deliverable: the table and verdict below. Reproduce with
 python scripts/benchmark.py
 ```
 
-PostgreSQL runs in a throwaway container. Nothing else in this repository depends on it:
+PostgreSQL runs in a throwaway container, described in `docker-compose.yml`. Nothing else in
+this repository depends on it, so it only needs to be running while benchmarking:
 
 ```bash
-docker run -d --name dsai6226-pg -e POSTGRES_PASSWORD=labpass -e POSTGRES_USER=lab -e POSTGRES_DB=adult -p 55432:5432 postgres:16-alpine
+docker compose up -d
 ```
+
+It listens on 55432 to stay clear of any PostgreSQL already installed on the machine.
+`docker compose down -v` removes it again.
 
 ### The comparison
 
