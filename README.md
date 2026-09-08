@@ -2,7 +2,15 @@
 
 Coursework repository for the Adult census income dataset.
 
-**Team E:** Mhina Lukurunge, Samwel Mmari, Asajile Mwakyalabwe, Essa Mohamedali, Paschal Bizulu
+**Team E**
+
+| Member | GitHub |
+|---|---|
+| Mhina Lukurunge | [@zukazudo](https://github.com/zukazudo) |
+| Samwel Mmari | [@SuperMan-Tz](https://github.com/SuperMan-Tz) |
+| Asajile Mwakyalabwe | [@mwakyalabwea-code](https://github.com/mwakyalabwea-code) |
+| Essa Mohamedali | [@EssaMohamedali](https://github.com/EssaMohamedali) |
+| Paschal Bizulu | [@pascode47](https://github.com/pascode47) |
 
 ## The dataset
 
