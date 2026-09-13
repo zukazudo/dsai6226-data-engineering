@@ -15,6 +15,10 @@ venv/
 *.duckdb.wal
 *.parquet
 warehouse/
+cloud/
+
+# Office lock files, created while a document is open
+~$*
 
 # OS and editor
 Thumbs.db

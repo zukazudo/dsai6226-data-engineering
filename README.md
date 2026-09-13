@@ -96,7 +96,7 @@ which is too thin to allocate a budget against. After the rollup it is 18 of 80.
 
 **Second departure: top-coded measures are stored NULL with a companion flag.** Where
 `capital.gain` was 99999, the fact table holds NULL and `capital_gain_is_topcoded` is true.
-An average then excludes the censored records automatically instead of being poisoned by them.
+An average then excludes the censored records automatically, so a placeholder never enters a mean.
 The same applies to `age` at 90 and `hours.per.week` at 99. `capital.loss` has no sentinel and
 loads unaltered.
 
@@ -105,7 +105,7 @@ safe automatic operation here, because a data entry duplicate and two genuinely 
 are indistinguishable without a key. So all 32,561 rows load. The 47 rows that belong to a
 duplicate group carry a `duplicate_group_id`, and `duplicate_seq` numbers them in source
 order. A deduplicated view is `WHERE duplicate_seq IS NULL OR duplicate_seq = 1`. The decision
-is recorded in the data instead of being applied silently at load, and it stays reversible.
+is recorded in the data, not applied silently at load, and it stays reversible.
 
 ### Why not one big table
 
@@ -205,7 +205,7 @@ of that exact content within the file:
 
 Re-reading the same file reproduces exactly the same keys, so the insert finds them already
 present and does nothing. The occurrence suffix is what lets the 24 known duplicate rows
-survive: three identical records become `#1`, `#2` and `#3` instead of collapsing into one.
+survive: three identical records become `#1`, `#2` and `#3`, where otherwise they would collapse into one.
 
 The limitation is worth stating plainly. Two genuinely different people who match on all 15
 attributes are indistinguishable to this scheme, exactly as they were indistinguishable to
@@ -363,6 +363,64 @@ the CSV, and it needs no server running before anyone can ask a question. Postgr
 survive a crash, and neither is true of a coursework warehouse that one analyst rebuilds from
 a clone in seconds.
 
+## Lab 5: touch a real cloud warehouse
+
+Deliverable: [`docs/Team_E_Lab5_Cloud_Warehouse.docx`](docs/Team_E_Lab5_Cloud_Warehouse.docx)
+
+The denormalised table loaded into the BigQuery sandbox, one aggregate run against it, and the
+full cloud pipeline designed with a cost note on every box.
+
+```
+sql/06_bigquery.sql       the three sandbox queries, with the measured figures
+scripts/bq_bytes.py       predicts a BigQuery scan from the data, before running it
+```
+
+Run on 13 September 2026 in project `dsai6226-team-e`, dataset `adult`, region
+`africa-south1`. All 32,561 records uploaded.
+
+### The figure the lab is about
+
+| Query | Predicted scan | Measured | Billed |
+|---|---:|---:|---:|
+| The aggregate, six columns referenced | 1,898,872 bytes (1.81 MB) | 1.81 MB | 10 MB |
+| `SELECT *` over all twenty-four | 5,604,157 bytes (5.34 MB) | 5.34 MB | 10 MB |
+
+Both predictions were exact. They were computed locally before the sandbox was opened, by
+`scripts/bq_bytes.py`: column widths in BigQuery are fixed by type, a NULL costs nothing, and
+a query reads only the columns it names, so the scan is arithmetic rather than a mystery.
+
+Billing rounds both to 10 MB, the per-table minimum, and the sandbox includes the first
+terabyte scanned each month. The saving between them is real in bytes and zero in money at
+this size.
+
+The upload was checked against Lab 1 in one query: 32,561 records, an eligible pool of 16,005,
+1,836 occupations unknown, 7 not applicable, 159 top-coded capital gains. Every figure survives
+the chain from source CSV through the warehouse and the export into the cloud, and the
+aggregate returned the same 87 segments.
+
+### What we got wrong first, and what it taught us
+
+Unit 5 calls `SELECT *` the most expensive words in the cloud. The query written to demonstrate
+that did not demonstrate it. Wrapping the table in a subquery selecting everything, then
+aggregating six columns, still scanned 1.81 MB, because BigQuery prunes columns a query never
+references. Only a bare `SELECT *` with no aggregation, which leaves nothing to prune, reached
+5.34 MB.
+
+The rule that survives testing is narrower than the slogan: you pay for the columns your query
+**references**, so the saving comes from needing fewer columns, not from how the `FROM` clause
+is written. The failed query is kept as a comment in `sql/06_bigquery.sql`, because it is more
+instructive than the one that worked.
+
+### One line of the lecture is now out of date
+
+Unit 5 names AWS Cape Town and Azure South Africa as the nearest major regions and says much
+GCP analytics still runs from Europe. BigQuery now offers `africa-south1` in Johannesburg, and
+it accepted the dataset without complaint, so that is the region this project uses.
+
+Proximity is not compliance. Johannesburg is still outside Tanzania, so moving personal data
+there would need safeguards under the PDPA regardless. The point is that the region was chosen
+and can be defended, and that no default was accepted.
+
 ## Reproducing the Lab 1 figures
 
 ```bash
@@ -381,6 +439,7 @@ presentations/ slide decks
 scripts/      the ingester
 sql/          schema and queries
 tests/        fixtures that exercise the reject path
+cloud/        generated CSV export for the sandbox, not committed
 warehouse/    generated DuckDB file, not committed
 ```
 
