@@ -264,11 +264,12 @@ python scripts/ingest.py --reset
 
 ## Presentation
 
-[`presentations/Team_E_Labs_1_to_4.pptx`](presentations/Team_E_Labs_1_to_4.pptx)
+[`presentations/Team_E_Labs_1_to_5.pptx`](presentations/Team_E_Labs_1_to_5.pptx)
 
-Twenty-one slides covering all four labs as one argument: three defects found, the two
-decisions that close them, and the engine the result points at. Section dividers mark the lab
-boundaries. Speaker notes are on every slide.
+Twenty-five slides covering all five labs as one argument: three defects found, the two
+decisions that close them, the engine the result points at, and what the same question costs
+in a cloud warehouse. Section dividers mark the lab boundaries. Speaker notes are on every
+slide.
 
 ## Lab 4: benchmark, do not believe
 
