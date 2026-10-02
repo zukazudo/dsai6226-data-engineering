@@ -9,9 +9,13 @@
 -- ---------------------------------------------------------------------------
 
 -- ------------------------------------------------------------ 1. validation
--- Rows that fail any rule are recorded with the reason and excluded from the
--- fact load. A row can fail more than one rule and gets one reject row per
--- reason, which is why the primary key is (record_key, reason).
+-- Ten executable rules. Eight test validity, one tests completeness and one
+-- tests uniqueness, which are the three dimensions Lab 6 asks for.
+--
+-- Rows that fail any rule are recorded with the reason, copied whole into
+-- quarantine, and excluded from the fact load. A row can fail more than one
+-- rule and gets one reject row per reason, which is why the primary key is
+-- (record_key, reason).
 --
 -- The rules reject rows that are malformed. They do not reject rows that are
 -- merely odd. The three records contradicting themselves on sex and
@@ -76,11 +80,94 @@ FROM (
         WHERE d.education = s.education
           AND d.education_num = try_cast(s.education_num AS SMALLINT)
     )
+
+    -- COMPLETENESS. Lab 6 rule 9.
+    --
+    -- An empty field is not the same thing as '?'. '?' is the source saying
+    -- "asked, not answered", which Lab 2 models as a real dimension member and
+    -- which 2,399 records legitimately carry. An empty or whitespace field is
+    -- the source saying nothing at all, which is a delivery fault.
+    --
+    -- Rejecting '?' here would destroy 1,836 records and contradict two labs.
+    -- The distinction is the whole point of the check.
+    UNION ALL
+    SELECT record_key, source_file, source_row, 'required_field_empty',
+           'empty: ' || concat_ws(', ',
+               CASE WHEN trim(coalesce(age, ''))            = '' THEN 'age' END,
+               CASE WHEN trim(coalesce(workclass, ''))       = '' THEN 'workclass' END,
+               CASE WHEN trim(coalesce(education, ''))       = '' THEN 'education' END,
+               CASE WHEN trim(coalesce(marital_status, ''))  = '' THEN 'marital.status' END,
+               CASE WHEN trim(coalesce(occupation, ''))      = '' THEN 'occupation' END,
+               CASE WHEN trim(coalesce(relationship, ''))    = '' THEN 'relationship' END,
+               CASE WHEN trim(coalesce(race, ''))            = '' THEN 'race' END,
+               CASE WHEN trim(coalesce(sex, ''))             = '' THEN 'sex' END,
+               CASE WHEN trim(coalesce(native_country, ''))  = '' THEN 'native.country' END,
+               CASE WHEN trim(coalesce(income, ''))          = '' THEN 'income' END)
+    FROM stg_adult
+    WHERE trim(coalesce(age, ''))           = ''
+       OR trim(coalesce(workclass, ''))      = ''
+       OR trim(coalesce(education, ''))      = ''
+       OR trim(coalesce(marital_status, '')) = ''
+       OR trim(coalesce(occupation, ''))     = ''
+       OR trim(coalesce(relationship, ''))   = ''
+       OR trim(coalesce(race, ''))           = ''
+       OR trim(coalesce(sex, ''))            = ''
+       OR trim(coalesce(native_country, '')) = ''
+       OR trim(coalesce(income, ''))         = ''
+
+    -- UNIQUENESS. Lab 6 rule 10.
+    --
+    -- record_key is a content hash plus the occurrence number of that content,
+    -- so two identical source rows get #1 and #2 and both load. A key that
+    -- appears twice in staging therefore means the keying itself failed, not
+    -- that the data contained a duplicate.
+    --
+    -- This dataset has no business key and its 47 duplicate rows are kept
+    -- deliberately, so this is the only row-level uniqueness statement that is
+    -- true of it. Uniqueness of the loaded star is asserted separately, by
+    -- scripts/quality_checks.py.
+    UNION ALL
+    SELECT record_key, min(source_file), min(source_row), 'duplicate_record_key',
+           'record_key staged ' || CAST(count(*) AS VARCHAR) || ' times'
+    FROM stg_adult
+    GROUP BY record_key
+    HAVING count(*) > 1
 ) v
 WHERE NOT EXISTS (
     SELECT 1 FROM load_reject r
     WHERE r.record_key = v.record_key AND r.reason = v.reason
 );
+
+
+-- --------------------------------------------------- 1b. quarantine the rows
+-- load_reject now holds the verdicts for this run. Copy the refused records
+-- themselves into the holding table, so the question "what was in that row?"
+-- is answerable without staging still being around.
+--
+-- Driven off load_reject rather than repeating the rule predicates, so the two
+-- tables cannot disagree about what was refused. Idempotent on
+-- (record_key, reason), like everything else here.
+
+INSERT INTO quarantine (
+    load_run_id, record_key, reason, detail, quarantined_at,
+    source_file, source_row,
+    age, workclass, fnlwgt, education, education_num, marital_status,
+    occupation, relationship, race, sex, capital_gain, capital_loss,
+    hours_per_week, native_country, income
+)
+SELECT r.load_run_id, r.record_key, r.reason, r.detail, now(),
+       r.source_file, r.source_row,
+       s.age, s.workclass, s.fnlwgt, s.education, s.education_num,
+       s.marital_status, s.occupation, s.relationship, s.race, s.sex,
+       s.capital_gain, s.capital_loss, s.hours_per_week, s.native_country,
+       s.income
+FROM load_reject r
+JOIN stg_adult s ON s.record_key = r.record_key
+WHERE r.load_run_id = $run_id
+  AND NOT EXISTS (
+      SELECT 1 FROM quarantine q
+      WHERE q.record_key = r.record_key AND q.reason = r.reason
+  );
 
 
 -- ---------------------------------------------------- 2. dimension upserts

@@ -45,7 +45,12 @@ SQL_DIR = ROOT / "sql"
 DEFAULT_DB = ROOT / "warehouse" / "adult.duckdb"
 DEFAULT_SOURCE = ROOT / "data" / "adult.csv"
 
-DDL_FILES = ["01_staging.sql", "02_schema.sql"]
+# 05_analytic.sql defines analytic_person, the one table published for use.
+# It belongs here rather than being created on demand by whichever script
+# happens to need it: before Lab 6 only scripts/benchmark.py built it, so a
+# fresh clone that ran the ingester had a star and no serving view, and the
+# lineage section would have described a hop the pipeline never performed.
+DDL_FILES = ["01_staging.sql", "02_schema.sql", "05_analytic.sql"]
 LOAD_FILE = "03_load.sql"
 
 # The 15 source columns, in file order, with the snake_case names used from
@@ -102,7 +107,8 @@ def apply_ddl(con: duckdb.DuckDBPyConnection) -> None:
 def reset(con: duckdb.DuckDBPyConnection) -> None:
     log.warning("--reset: dropping every table and sequence")
     for t in [
-        "fact_person", "load_reject", "stg_adult", "load_run",
+        "fact_person", "load_reject", "quarantine", "quality_check_result",
+        "stg_adult", "load_run",
         "dim_workclass", "dim_education", "dim_marital_status", "dim_occupation",
         "dim_relationship", "dim_race", "dim_sex", "dim_native_country",
     ]:

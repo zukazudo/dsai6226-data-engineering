@@ -73,3 +73,64 @@ CREATE TABLE IF NOT EXISTS load_reject (
     detail          VARCHAR,
     PRIMARY KEY (record_key, reason)
 );
+
+
+-- --------------------------------------------------------------- quarantine
+-- Lab 6. load_reject records THAT a row was refused and why. It does not hold
+-- the row, so answering "what was actually in it?" meant joining back to
+-- staging and hoping staging had not been pruned.
+--
+-- quarantine is the holding table: the full refused record, its reason code,
+-- and when it was set aside. Unit 6 asks for rows that are visible and
+-- fixable, and a reason code on its own is neither.
+--
+-- A row can break more than one rule, so the key is (record_key, reason), the
+-- same shape as load_reject. The two are populated in the same statement and
+-- are always consistent; load_reject stays because the run summary counts from
+-- it and nothing downstream should have to read whole rows to count them.
+
+CREATE TABLE IF NOT EXISTS quarantine (
+    load_run_id     INTEGER     NOT NULL,
+    record_key      VARCHAR     NOT NULL,
+    reason          VARCHAR     NOT NULL,
+    detail          VARCHAR,
+    quarantined_at  TIMESTAMP   NOT NULL,
+    source_file     VARCHAR     NOT NULL,
+    source_row      INTEGER     NOT NULL,
+
+    -- the refused record exactly as it was staged, every field as text
+    age             VARCHAR,
+    workclass       VARCHAR,
+    fnlwgt          VARCHAR,
+    education       VARCHAR,
+    education_num   VARCHAR,
+    marital_status  VARCHAR,
+    occupation      VARCHAR,
+    relationship    VARCHAR,
+    race            VARCHAR,
+    sex             VARCHAR,
+    capital_gain    VARCHAR,
+    capital_loss    VARCHAR,
+    hours_per_week  VARCHAR,
+    native_country  VARCHAR,
+    income          VARCHAR,
+
+    PRIMARY KEY (record_key, reason)
+);
+
+
+-- ------------------------------------------------------- quality check runs
+-- Table-level assertions write their verdict here, so "were the checks green
+-- the last time this warehouse was built?" is a query rather than a memory.
+-- Lab 7 will read the latest row to show a freshness label.
+
+CREATE TABLE IF NOT EXISTS quality_check_result (
+    checked_at      TIMESTAMP   NOT NULL,
+    check_name      VARCHAR     NOT NULL,
+    dimension       VARCHAR     NOT NULL,
+    passed          BOOLEAN     NOT NULL,
+    observed        VARCHAR,
+    expected        VARCHAR,
+    detail          VARCHAR,
+    PRIMARY KEY (checked_at, check_name)
+);

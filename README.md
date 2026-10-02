@@ -422,6 +422,237 @@ Proximity is not compliance. Johannesburg is still outside Tanzania, so moving p
 there would need safeguards under the PDPA regardless. The point is that the region was chosen
 and can be defended, and that no default was accepted.
 
+## Lab 6: guard the pipeline
+
+Deliverable: the checks in [`sql/03_load.sql`](sql/03_load.sql) and
+[`scripts/quality_checks.py`](scripts/quality_checks.py), the `quarantine` table, and the
+lineage and PDPA sections below.
+
+```bash
+python scripts/ingest.py          # ten rules run on every load
+python scripts/quality_checks.py  # thirty-two assertions on the result
+```
+
+Unit 6 names five dimensions of quality: complete, valid, fresh, unique and consistent. The
+checks are split across two places, because two different kinds of failure need two different
+answers.
+
+| | Row level, in `sql/03_load.sql` | Table level, in `scripts/quality_checks.py` |
+|---|---|---|
+| Judges | one record at a time | the warehouse as a whole |
+| On failure | the row is quarantined, the load continues | the build is wrong, exit code 1 |
+| Count | 10 rules | 32 assertions |
+| Covers | validity, completeness, uniqueness | all five dimensions |
+
+A row-level rule can set one record aside and let the other 32,560 through. A table-level
+property, such as no surrogate key being duplicated, cannot be blamed on any single row and
+cannot be fixed by removing one, so there is nothing to quarantine and the only honest
+response is to fail the build.
+
+### The ten rules that decide whether a row may enter
+
+| Rule | Dimension | Rejects |
+|---|---|---|
+| `age_not_an_integer` | valid | an age that will not cast |
+| `age_out_of_range` | valid | an age outside 1 to 120 |
+| `fnlwgt_not_a_positive_integer` | valid | a survey weight that is zero, negative or unparseable |
+| `hours_per_week_out_of_range` | valid | hours outside 1 to 99 |
+| `capital_value_invalid` | valid | a negative or unparseable capital gain or loss |
+| `income_not_recognised` | valid | an income band outside the two the source defines |
+| `sex_not_recognised` | valid | a value outside the two the source defines |
+| `education_mapping_mismatch` | valid | a label and level pair the seeded ladder does not contain |
+| `required_field_empty` | complete | a field that is empty or whitespace |
+| `duplicate_record_key` | unique | the same record_key staged twice |
+
+Eight of these predate Lab 6. The last two are new, and each needed a decision about what the
+dimension actually means for this dataset.
+
+**Completeness is not the same as rejecting the question marks.** 2,399 records carry `?`,
+which is the source saying *asked, not answered*. Lab 2 models that as a real dimension
+member, split into `Unknown` and `Not applicable`, because the seven `Never-worked` records
+genuinely have no occupation rather than a missing one. A completeness rule that rejected `?`
+would delete 1,836 records and undo two labs of reasoning. `required_field_empty` therefore
+fires on a field that is empty or whitespace, which is the source saying nothing at all, and
+that is a delivery fault. The distinction between *nothing was recorded* and *the answer was
+unknown* is the entire content of the rule.
+
+**Uniqueness is mostly not a row-level property here.** The source has no business key, and
+Lab 2 decided its 47 duplicate rows are kept and marked rather than dropped, because nothing
+proves they are errors. `record_key` is a content hash plus the occurrence number of that
+content, so two identical rows become `#1` and `#2` and both load correctly. The only
+row-level uniqueness statement that is true of this dataset is that a key must not be staged
+twice, and by construction it cannot be. Real uniqueness lives one level up, in the eleven
+table-level assertions, where it is both checkable and has been seen to fail.
+
+### Quarantine
+
+`load_reject` already recorded *that* a row was refused and why. It did not hold the row, so
+answering what was actually in it meant joining back to staging and hoping staging was still
+there. Unit 6 asks for rows that are visible and fixable, and a reason code on its own is
+neither.
+
+`quarantine` holds the refused record whole: every source field as text, the reason code, the
+detail, the run, and the moment it was set aside. It is filled from `load_reject` rather than
+by repeating the rule predicates, so the two tables cannot disagree about what was refused.
+
+Proving it, with the fixture in
+[`tests/fixtures/adult_quarantine_demo.csv`](tests/fixtures/adult_quarantine_demo.csv):
+
+```bash
+python scripts/ingest.py tests/fixtures/adult_quarantine_demo.csv --db demo.duckdb
+```
+
+```
+rows read     2
+staged        2
+rejected      1, by reason:
+    required_field_empty   1   e.g. empty: occupation
+loaded        1
+```
+
+Two rows, and the pair is the point. One has an empty `occupation` and is quarantined with its
+values intact. The other has `occupation` set to `?` and loads, mapped to the `Unknown`
+member. The second row is the control: if it is ever refused, the completeness rule has
+silently become a Lab 2 regression that deletes 1,836 records.
+
+```
+quarantine
+  record_key   cdb4b4a7b45d9c2ae7a4f27ad553fbb5#1
+  reason       required_field_empty
+  detail       empty: occupation
+  source_row   1   occupation NULL   age 44   workclass Private
+
+fact_person
+  source_row   2   occupation 'Unknown'   is_unknown true
+```
+
+Nine of the ten rules are demonstrated against
+[`tests/fixtures/adult_bad_rows.csv`](tests/fixtures/adult_bad_rows.csv), which quarantines
+nine rows and loads one. `duplicate_record_key` is the tenth and cannot be demonstrated from a
+file, for the reason given above.
+
+### The checks have been seen to fail
+
+A suite that has only ever been green is a wish. Faults were injected into a copy of the
+warehouse to confirm the suite notices:
+
+| Injected | Caught by |
+|---|---|
+| `capital_gain` written back as the raw 99999 sentinel | `capital_gain_topcode_is_null`, `capital_gain_sentinel_absent` |
+| `quarantine` emptied, so refused rows vanish from the record | `staged_rows_all_accounted` |
+
+Three further attempts were refused by the schema before the checks ever saw them. A duplicate
+`person_sk` hit the primary key, a nulled `source_file` hit a NOT NULL constraint, and
+deleting a `dim_race` member hit a foreign key. That is the more comfortable finding of the
+two. Constraints make a class of corruption impossible, and checks catch what constraints
+cannot express. Both layers are doing work.
+
+### Lineage: every table, every hop
+
+```
+data/adult.csv                             32,561 rows, sha256 recorded per run
+  |
+  |  scripts/ingest.py, stage()
+  |  record_key = md5(all 15 source fields) + '#' + occurrence number
+  |  append-only, anti-joined on record_key, so a re-read stages nothing
+  v
+stg_adult                                  every field as text, nothing cleaned
+  |
+  |  sql/03_load.sql, step 1: the ten rules
+  |-------------------------------> load_reject    one row per (record_key, reason)
+  |                                      |
+  |                                      v
+  |                                 quarantine     the refused record, whole
+  |
+  |  sql/03_load.sql, step 2: dimension upserts
+  |-------------------------------> dim_workclass, dim_education, dim_marital_status,
+  |                                 dim_occupation, dim_relationship, dim_race,
+  |                                 dim_sex, dim_native_country
+  |                                 new members only, surrogate keys never renumbered
+  |
+  |  sql/03_load.sql, step 3: fact load
+  |  '?' resolves to the reserved member, never NULL
+  |  top-coded measures load as NULL beside a boolean flag
+  v
+fact_person                                32,561 rows, 8 NOT NULL foreign keys
+  |                                        carries load_run_id, source_file, source_row
+  |  sql/05_analytic.sql, applied by the ingester
+  v
+analytic_person                            the one published table, 24 columns
+  |
+  |--> scripts/benchmark.py       CSV, Parquet and PostgreSQL copies for Lab 4
+  |--> cloud/adult_analytic.csv   the BigQuery upload for Lab 5
+
+load_run     one row per execution: file, sha256, byte count, rows read, staged,
+             rejected, loaded, start, finish, status
+```
+
+Every arrow is written down, which is what Unit 6 asks for. Two properties follow from it.
+
+**Any published number traces back to a line of a file.** `fact_person` carries
+`load_run_id`, `source_file` and `source_row`, and `load_run` carries the sha256 and byte
+count of the file that run read. A figure in `analytic_person` resolves to a fact row, to a
+staged record, to a numbered line of a file whose hash is on record. Lab 1 concluded that a
+decision spending public money had no auditable lineage, and this is the part that fixes it.
+
+**Nothing leaves the pipeline unaccounted for.** Every staged row is either in `fact_person`
+or in `quarantine`, which the `staged_rows_all_accounted` assertion checks on every run. The
+failure mode it exists to prevent is silent deletion, where rows disappear and the only
+evidence is a row count nobody compared.
+
+Lab 6 also closed a gap in this map. `analytic_person` was previously created on demand by
+`scripts/benchmark.py` rather than by the pipeline, so a fresh clone that ran the ingester had
+a star and no serving view, and the hop above would have described something the pipeline did
+not do. `05_analytic.sql` is now applied by the ingester.
+
+### PDPA: does this dataset contain personal data?
+
+Unit 6 gives a four-step walkthrough. Running it honestly on this project gives two different
+answers, and the difference between them is the point.
+
+**Step 1, is there personal data?** Not in this file. `adult.csv` is an extract of the 1994
+United States Census Bureau Current Population Survey, published by the UCI repository as
+public-use microdata. It carries no name, address, identifier or contact detail, and no data
+subject in it is Tanzanian.
+
+That is not quite the end of the question, because the file is person-level and its columns
+are quasi-identifiers: age, sex, race, education, occupation, marital status, native country,
+hours and capital gains, in combination, could in principle single someone out. The
+reassuring part is that the publisher already applied disclosure control, and Lab 1 found the
+evidence without knowing that was what it was looking at. The three top-coded measures, `age`
+capped at 90 with zero records at 89, `capital.gain` at 99999 and `hours.per.week` at 99, are
+exactly that: the tails compressed into one bucket so the unusual respondent cannot be picked
+out. What Lab 1 recorded as a data quality defect is anonymisation doing its job. Both
+readings are true at once, which is why those measures are kept, flagged and excluded from
+averages rather than deleted.
+
+**Steps 2 to 4 do not bite on this file**, because step 1 answered no. Stating a purpose,
+identifying a lawful basis, minimising the fields and documenting retention are obligations
+that attach to personal data, and there is none here. Claiming to comply would misrepresent
+what the law requires.
+
+**They would bite on the pipeline Lab 1 described.** The consumer in the Lab 1 problem
+statement receives outcome records back from delivery providers, and those are about
+identifiable living people in Tanzania. For that system the Personal Data Protection Act, No.
+11 of 2022 applies in full, and the obligations are concrete rather than decorative:
+
+- **Register with the Personal Data Protection Commission before processing begins.** Unit 6
+  is blunt that being small is not an exemption. This is a prerequisite, not a closing task.
+- **State the purpose in writing and identify a lawful basis**, then keep only the fields that
+  purpose needs. Minimisation is a constraint on the schema, not a cleanup job afterwards.
+- **Keep it inside compliant borders.** Lab 5 chose `africa-south1` deliberately rather than
+  accepting a default, and recorded why. Under the PDPA a transfer outside Tanzania needs
+  adequate protection and a prior transfer permit from the Commission, so the region is a
+  legal decision before it is a latency one.
+- **Separate identity from analysis.** The 87-row segment summary this project produces
+  contains no personal data at all. A design that keeps identifiable records in one place and
+  publishes only aggregates reduces both the legal surface and the cost.
+
+The honest summary is that this repository holds no personal data and owes the PDPA nothing,
+while the system it rehearses would owe it a great deal. Saying the first without the second
+would misread the law. Saying the second without the first would be compliance theatre over a
+public teaching file.
+
 ## Reproducing the Lab 1 figures
 
 ```bash
@@ -437,9 +668,9 @@ data/         source data, unmodified
 docs/         lab deliverables
 notebooks/    exploratory analysis
 presentations/ slide decks
-scripts/      the ingester
-sql/          schema and queries
-tests/        fixtures that exercise the reject path
+scripts/      the ingester and the quality checks
+sql/          schema, quality rules and queries
+tests/        fixtures that exercise the reject and quarantine paths
 cloud/        generated CSV export for the sandbox, not committed
 warehouse/    generated DuckDB file, not committed
 ```
