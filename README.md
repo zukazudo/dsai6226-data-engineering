@@ -653,6 +653,129 @@ while the system it rehearses would owe it a great deal. Saying the first withou
 would misread the law. Saying the second without the first would be compliance theatre over a
 public teaching file.
 
+## Lab 7: open one clean tap
+
+Deliverable: the serving table [`sql/07_mart.sql`](sql/07_mart.sql), the definitions in
+[`metrics.md`](metrics.md), and the consumer view built by
+[`scripts/dashboard.py`](scripts/dashboard.py).
+
+```bash
+python scripts/ingest.py      # publishes mart_segment_allocation, 87 segments
+python scripts/dashboard.py   # writes docs/dashboard.html
+```
+
+### The table
+
+`mart_segment_allocation`, one row per occupation and education group, 87 rows. It answers the
+question Lab 1 was written around: where in the eligible pool are the candidates, and which of
+those segments can carry a decision.
+
+It is not `analytic_person`. That table is row level, exists so a flat file can answer the
+same question the star answers, and feeds the Lab 4 benchmark and the Lab 5 export. A serving
+table is a different thing: small, aggregated to a stated grain, and documented. Unit 7 calls
+the alternative the anti-pattern, where every chart computes its own numbers from raw data and
+ten charts produce ten slightly different answers.
+
+| Column | What it is |
+|---|---|
+| `occupation`, `education_group` | the grain |
+| `candidates` | people in the segment; sums to 16,005 |
+| `pct_of_eligible_pool` | share of the pool; sums to 100 |
+| `mean_hours`, `mean_capital_gain` | averages, top-coded values excluded |
+| `hours_measured_on`, `capital_gain_measured_on` | how many records each mean used |
+| `segment_is_sparse` | fewer than 30 people; 20 of 87 |
+| `occupation_is_assignable` | false where the occupation is Unknown or Not applicable; 7 of 87 |
+| `refreshed_at`, `source_load_run_id` | when it was built, and by which run |
+
+Two of those columns exist because a number alone can mislead. Publishing `mean_hours` without
+`hours_measured_on` hides the difference between a mean over 12 records and a mean over 1,200.
+Publishing `candidates` without `segment_is_sparse` lets a chart put a seven-person segment
+beside a seven-hundred-person one with no visible difference.
+
+Nothing is filtered out of the table that belongs in the pool. The seven unassignable segments
+are published and flagged rather than dropped, because dropping them would stop the segment
+counts summing to 16,005, and a total that does not reconcile is how two dashboards begin to
+disagree.
+
+### It is a table, not a view, and that was the decision
+
+A view would be recomputed on every read and could therefore never be stale. That sounds like
+an advantage until the lab asks for a freshness label, at which point a view makes the label
+meaningless: it would always say fresh, whatever had happened to the pipeline, and a label
+that cannot go stale is worse than no label because it is a promise nothing can break.
+
+Materialising the table means it carries `refreshed_at`, the moment it was actually built. A
+pipeline that stops running leaves a table that visibly ages. `scripts/ingest.py` rebuilds it
+on every run, so "refreshed by the pipeline itself" is a fact rather than an aspiration, and
+`--reset` drops it so a stale serving table cannot survive a rebuild.
+
+### metrics.md
+
+Every published number has a formula, a grain, filters and an owner in
+[`metrics.md`](metrics.md). The file also defines the one thing most likely to be applied two
+different ways: the eligible pool is `income_gt_50k = FALSE AND age BETWEEN 25 AND 54`, which
+is 16,005 of 32,561 records, and it is applied once in the mart and nowhere else.
+
+Unit 7's worked example is three teams reporting 82, 76 and 88 per cent coverage in the same
+meeting, each correct by its own definition. The cure is not a better chart. It is one written
+definition computed once.
+
+### The consumer view
+
+[`docs/dashboard.html`](docs/dashboard.html), a single self-contained file with no external
+requests, generated from the serving table. Against the five hygiene rules Unit 7 sets out:
+
+| Rule | What the view does |
+|---|---|
+| Know the audience | the Lab 1 consumer allocating support, who needs segments and their trustworthiness, not a national trend |
+| One question per view | the heading is the question: where are the eligible candidates |
+| Show freshness | a computed banner, below |
+| Offer a drill path | pool totals, then the ten largest occupations, then all 87 segments |
+| Cut the junk | no gauges, no pie charts; one bar chart and one table |
+
+The rule it was weakest on is the drill path. The first version went straight from five tiles
+to an 87 row table, which is a summary and a haystack with nothing in between. The occupation
+chart was added as the middle step, so the eye can land on Craft-repair before meeting every
+segment it appears in.
+
+The page computes nothing. Every figure on it is a column of the serving table, which is the
+rule Unit 7 exists to enforce.
+
+### Breaking the refresh on purpose
+
+The label is computed from `max(refreshed_at)`, never typed. Thresholds: fresh under 24 hours,
+ageing up to seven days, stale beyond that.
+
+To prove it reacts, the last successful refresh was pushed back nine days directly in the
+warehouse, which is what a pipeline that silently stopped running would leave behind. The
+dashboard was then rebuilt with no override of any kind:
+
+```
+UPDATE mart_segment_allocation SET refreshed_at = refreshed_at - INTERVAL 9 DAY
+python scripts/dashboard.py
+```
+
+```
+87 segments, freshness STALE, data 216.0 h old
+
+STALE
+Data is 9.0 days old. This view is not current and should not be used for a
+decision until the pipeline has run.
+```
+
+The banner turns from green to red and the sentence changes from a reassurance to an
+instruction. Running the pipeline again clears it without anyone editing the page:
+
+```
+python scripts/ingest.py     # published 87 segments to mart_segment_allocation
+python scripts/dashboard.py  # 87 segments, freshness fresh, data 0.0 h old
+```
+
+That recovery is the half worth noticing. The label is not a warning someone remembered to
+switch on; it is a function of the data, so it goes stale on its own and clears on its own.
+`--stale-hours` exists on the script for rehearsing the other thresholds, but the run above
+used none of it.
+
 ## Reproducing the Lab 1 figures
 
 ```bash
@@ -665,11 +788,12 @@ Requires pandas. Developed against Python 3.14 and pandas 3.0.3.
 
 ```
 data/         source data, unmodified
-docs/         lab deliverables
+docs/         lab deliverables and the generated dashboard
 notebooks/    exploratory analysis
 presentations/ slide decks
-scripts/      the ingester and the quality checks
-sql/          schema, quality rules and queries
+metrics.md    the definition of every published number
+scripts/      the ingester, the quality checks and the dashboard
+sql/          schema, quality rules, the serving table and queries
 tests/        fixtures that exercise the reject and quarantine paths
 cloud/        generated CSV export for the sandbox, not committed
 warehouse/    generated DuckDB file, not committed

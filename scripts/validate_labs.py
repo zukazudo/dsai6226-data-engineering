@@ -225,6 +225,31 @@ def lab5(r: Report):
     r.skip(5, "sandbox run", "needs a Google sign-in; measured 1.81 MB on 13 Sep 2026")
 
 
+# --------------------------------------------------------------------- lab 7
+
+def lab7(con, r: Report):
+    """The serving table's published invariants, exactly as metrics.md claims."""
+    r.check(7, "87 segments published",
+            q(con, "SELECT count(*) FROM mart_segment_allocation"), 87)
+    r.check(7, "candidates sum to the eligible pool",
+            q(con, "SELECT sum(candidates) FROM mart_segment_allocation"), 16005)
+    r.check(7, "share sums to 100 within rounding",
+            round(q(con, "SELECT sum(pct_of_eligible_pool) FROM mart_segment_allocation")) , 100)
+    r.check(7, "20 sparse segments",
+            q(con, "SELECT count(*) FROM mart_segment_allocation WHERE segment_is_sparse"), 20)
+    r.check(7, "7 unassignable segments",
+            q(con, """SELECT count(*) FROM mart_segment_allocation
+                      WHERE NOT occupation_is_assignable"""), 7)
+    # A mean must never be computed on more rows than the segment holds, and the
+    # gap between them is exactly the top-coded records metrics.md describes.
+    r.check(7, "no mean is measured on more rows than exist",
+            q(con, """SELECT count(*) FROM mart_segment_allocation
+                      WHERE hours_measured_on > candidates
+                         OR capital_gain_measured_on > candidates"""), 0)
+    r.check(7, "every segment records when it was built",
+            q(con, "SELECT count(*) FROM mart_segment_allocation WHERE refreshed_at IS NULL"), 0)
+
+
 # --------------------------------------------------------------------- lab 6
 
 def lab6(r: Report):
@@ -239,7 +264,8 @@ def lab6(r: Report):
 # ------------------------------------------------------------------- reporting
 
 LABS = {1: "data problem statement", 2: "star schema", 3: "re-runnable ingester",
-        4: "benchmark", 5: "cloud warehouse", 6: "governance and quality"}
+        4: "benchmark", 5: "cloud warehouse", 6: "governance and quality",
+        7: "serving layer"}
 
 
 def main(argv=None) -> int:
@@ -260,6 +286,7 @@ def main(argv=None) -> int:
         if 1 in wanted: lab1(con, r)
         if 2 in wanted: lab2(con, r)
         if 4 in wanted: lab4(con, r)
+        if 7 in wanted: lab7(con, r)
     finally:
         con.close()                      # closed before anything shells out
     if 3 in wanted: lab3(r)

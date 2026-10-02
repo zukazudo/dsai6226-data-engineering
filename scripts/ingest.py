@@ -52,6 +52,10 @@ DEFAULT_SOURCE = ROOT / "data" / "adult.csv"
 # lineage section would have described a hop the pipeline never performed.
 DDL_FILES = ["01_staging.sql", "02_schema.sql", "05_analytic.sql"]
 LOAD_FILE = "03_load.sql"
+# Lab 7. The serving table is rebuilt after every load, so "refreshed by the
+# pipeline itself" is true rather than aspirational. It runs after the fact
+# load, not with the DDL, because it reads the rows that load just admitted.
+MART_FILE = "07_mart.sql"
 
 # The 15 source columns, in file order, with the snake_case names used from
 # staging onward. The source uses dots, which must be quoted in every statement
@@ -107,6 +111,7 @@ def apply_ddl(con: duckdb.DuckDBPyConnection) -> None:
 def reset(con: duckdb.DuckDBPyConnection) -> None:
     log.warning("--reset: dropping every table and sequence")
     for t in [
+        "mart_segment_allocation",
         "fact_person", "load_reject", "quarantine", "quality_check_result",
         "stg_adult", "load_run",
         "dim_workclass", "dim_education", "dim_marital_status", "dim_occupation",
@@ -195,6 +200,18 @@ def transform(con: duckdb.DuckDBPyConnection, run_id: int) -> None:
     con.execute(sql.replace("$run_id", str(run_id)))
 
 
+def refresh_mart(con: duckdb.DuckDBPyConnection) -> int:
+    """Rebuild the serving table and return its row count.
+
+    Separate from transform() because it is a different promise. transform()
+    decides what may enter the warehouse; this publishes what consumers read.
+    A failure here leaves the star correct and the mart stale, which is
+    precisely the state the freshness label on the dashboard exists to show.
+    """
+    con.execute((SQL_DIR / MART_FILE).read_text(encoding="utf-8"))
+    return con.execute("SELECT count(*) FROM mart_segment_allocation").fetchone()[0]
+
+
 def finish_run(con: duckdb.DuckDBPyConnection, run_id: int, counts: dict) -> None:
     con.execute(
         """
@@ -263,8 +280,13 @@ def ingest_file(con: duckdb.DuckDBPyConnection, path: Path) -> dict:
         log.info("  staged    %5d  (%d already present from an earlier run)", staged, already)
         report_rejects(con, run_id)
         log.info("  loaded    %5d", loaded)
+
+        segments = refresh_mart(con)
+        log.info("  published %5d segments to mart_segment_allocation", segments)
+
         log.info("  fact_person now holds %s rows  (%.0f ms)",
                  f"{after:,}", (time.perf_counter() - started) * 1000)
+        counts["segments"] = segments
         return counts
     except Exception:
         fail_run(con, run_id)
