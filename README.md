@@ -264,12 +264,18 @@ python scripts/ingest.py --reset
 
 ## Presentation
 
-[`presentations/Team_E_Labs_1_to_5.pptx`](presentations/Team_E_Labs_1_to_5.pptx)
+[`presentations/Team_E_Labs_1_to_9.pptx`](presentations/Team_E_Labs_1_to_9.pptx)
 
-Twenty-five slides covering all five labs as one argument: three defects found, the two
-decisions that close them, the engine the result points at, and what the same question costs
-in a cloud warehouse. Section dividers mark the lab boundaries. Speaker notes are on every
-slide.
+Thirty-nine slides covering all nine labs as one argument: three defects found, the decisions
+that close them, the engine the evidence points at, what the same question costs in a cloud
+warehouse, the checks that guard it, the one tap it serves, the feature table it feeds, and
+the measurement that showed where the time actually goes. Section dividers mark the lab
+boundaries. Speaker notes are on every slide.
+
+A fuller written companion is
+[`docs/Team_E_Revision_Guide_Labs_1_to_9.docx`](docs/Team_E_Revision_Guide_Labs_1_to_9.docx):
+twenty-six pages, one section per lab in the same rhythm, with a command reference and every
+figure worth memorising.
 
 ## Lab 4: benchmark, do not believe
 
