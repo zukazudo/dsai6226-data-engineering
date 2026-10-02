@@ -151,11 +151,12 @@ decision should be made against them, because there is no occupation to allocate
 | Formula | `now() - max(refreshed_at)` from `mart_segment_allocation` |
 | Promise | the table is rebuilt by every pipeline run |
 | Thresholds | fresh under 24 h, ageing 24 h to 7 days, **stale** beyond 7 days |
-| Shown on | the dashboard banner, computed at render time |
+| Shown on | the dashboard banner in `app.py`, computed at render time |
 | Owner | Team E |
 
 `refreshed_at` is written by `sql/07_mart.sql` when it rebuilds the table, so the label is
-computed from the data and never typed by hand. Unit 7 is blunt that hand-typed freshness
+computed from the data and never typed by hand. The thresholds live in `app.py`; the HTML
+export imports them rather than keeping a second copy. Unit 7 is blunt that hand-typed freshness
 rots; the banner is generated from this column every time the dashboard is built.
 
 `source_load_run_id` records which load run produced the rows, so a mart can be traced to the

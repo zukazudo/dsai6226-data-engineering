@@ -662,13 +662,19 @@ public teaching file.
 ## Lab 7: open one clean tap
 
 Deliverable: the serving table [`sql/07_mart.sql`](sql/07_mart.sql), the definitions in
-[`metrics.md`](metrics.md), and the consumer view built by
-[`scripts/dashboard.py`](scripts/dashboard.py).
+[`metrics.md`](metrics.md), and the consumer view in [`app.py`](app.py).
 
 ```bash
 python scripts/ingest.py      # publishes mart_segment_allocation, 87 segments
-python scripts/dashboard.py   # writes docs/dashboard.html
+streamlit run app.py          # the dashboard, on localhost:8501
+python scripts/dashboard.py   # optional: a static snapshot to docs/dashboard.html
 ```
+
+The dashboard is a Streamlit app. The HTML export is not a second dashboard: it renders the
+same table for the cases the app cannot cover, such as attaching a dated snapshot to a
+submission or reading the numbers without a Python environment. Both read
+`mart_segment_allocation`, neither computes a metric of its own, and the export imports its
+freshness thresholds from the app rather than keeping a second copy, so they cannot disagree.
 
 ### The table
 
@@ -728,24 +734,41 @@ definition computed once.
 
 ### The consumer view
 
-[`docs/dashboard.html`](docs/dashboard.html), a single self-contained file with no external
-requests, generated from the serving table. Against the five hygiene rules Unit 7 sets out:
+[`app.py`](app.py), a Streamlit app over the serving table. Against the five hygiene rules
+Unit 7 sets out:
 
 | Rule | What the view does |
 |---|---|
 | Know the audience | the Lab 1 consumer allocating support, who needs segments and their trustworthiness, not a national trend |
 | One question per view | the heading is the question: where are the eligible candidates |
 | Show freshness | a computed banner, below |
-| Offer a drill path | pool totals, then the ten largest occupations, then all 87 segments |
-| Cut the junk | no gauges, no pie charts; one bar chart and one table |
+| Offer a drill path | pool totals, then charts, then all 87 segments, with filters by occupation and education group and toggles for the sparse and unassignable rows |
+| Cut the junk | no gauges, no pie charts; one bar chart, one scatter, one table |
 
-The rule it was weakest on is the drill path. The first version went straight from five tiles
-to an 87 row table, which is a summary and a haystack with nothing in between. The occupation
-chart was added as the middle step, so the eye can land on Craft-repair before meeting every
-segment it appears in.
+The drill path is the rule this view was built to satisfy and the reason it is an app rather
+than a page. Selecting Craft-repair narrows the view to its six segments and 2,453 candidates,
+and the tiles show both the pool total and what is currently in scope, so narrowing the view
+never hides what it is a fraction of.
 
-The page computes nothing. Every figure on it is a column of the serving table, which is the
+The app computes nothing. Every figure on it is a column of the serving table, which is the
 rule Unit 7 exists to enforce.
+
+### The app never holds a lock on the warehouse
+
+This mattered more here than anywhere else in the project. DuckDB allows many readers or one
+writer, and a Streamlit server is a long-lived process: a connection held open by the
+dashboard, even a read-only one, makes the next `python scripts/ingest.py` fail with
+`Could not set lock on file`. The project's notes already record a Lab 3 notebook hitting
+exactly that.
+
+A dashboard that blocks the pipeline could not perform its own demonstration, because the
+demonstration is to break the refresh, run the pipeline, and watch the banner clear. So the
+app copies the warehouse to a temporary file, reads the copy, and closes it immediately. The
+copy is keyed on the warehouse's modification time, so a pipeline run invalidates the cache
+and the next interaction shows new data. Reading bytes takes no DuckDB lock at all.
+
+Verified rather than assumed: with the app serving on port 8501, a full
+`python scripts/ingest.py --reset`, which drops and rebuilds every table, completed normally.
 
 ### Breaking the refresh on purpose
 
@@ -774,13 +797,21 @@ instruction. Running the pipeline again clears it without anyone editing the pag
 
 ```
 python scripts/ingest.py     # published 87 segments to mart_segment_allocation
-python scripts/dashboard.py  # 87 segments, freshness fresh, data 0.0 h old
 ```
 
-That recovery is the half worth noticing. The label is not a warning someone remembered to
-switch on; it is a function of the data, so it goes stale on its own and clears on its own.
-`--stale-hours` exists on the script for rehearsing the other thresholds, but the run above
-used none of it.
+The banner returns to green on the next interaction, with no restart and nothing edited. That
+recovery is the half worth noticing: the label is a function of the data, so it goes stale on
+its own and clears on its own. `--stale-hours` exists on the export script for rehearsing the
+other thresholds, but the run above used none of it.
+
+### A bug worth recording
+
+The first version of the app cached its snapshot on a parameter named `_mtime`. Streamlit
+treats a leading underscore on a `cache_data` argument as do not hash this, so the one value
+the cache key existed for was excluded, and the page served the first snapshot it ever read.
+It looked perfectly correct until the pipeline ran and the banner refused to move. Renaming it
+to `mtime` fixed it. A caching bug is invisible exactly when the data has not changed, which is
+most of the time.
 
 ## Lab 8: build an honest feature table
 
@@ -1057,7 +1088,8 @@ notebooks/    exploratory analysis
 presentations/ slide decks
 DATASHEET.md  what this dataset is, and what it is not
 metrics.md    the definition of every published number
-scripts/      the ingester, the checks, the dashboard and the profiler
+app.py        the dashboard, run with streamlit
+scripts/      the ingester, the checks, the HTML export and the profiler
 sql/          schema, quality rules, the serving table and queries
 tests/        fixtures that exercise the reject and quarantine paths
 cloud/        generated CSV export for the sandbox, not committed

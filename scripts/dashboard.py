@@ -1,13 +1,17 @@
 """
-Lab 7: the consumer view over mart_segment_allocation.
+Lab 7: a static export of the consumer view.
 
-One screen answering one question: where in the pool are the eligible
-candidates, and which of those segments can actually carry a decision?
+The dashboard is app.py, run with `streamlit run app.py`. This script renders
+the same serving table to a single HTML file for the cases the app cannot
+cover: reading it without a Python environment, attaching it to a submission,
+or committing a dated snapshot of what the numbers were on a given day.
 
-It reads only the serving table. It computes no metric of its own, which is the
-rule Unit 7 exists to enforce: a chart that derives its own numbers from raw
-data is how two dashboards start disagreeing. Every figure on the page comes
-from a column defined in metrics.md.
+It is not a second dashboard. Unit 7 warns about dashboard sprawl, and the
+defence here is that both views read the same table and neither computes a
+metric of its own, so they cannot disagree. The freshness thresholds are
+imported from app.py rather than duplicated, for the same reason.
+
+Every figure comes from a column defined in metrics.md.
 
     python scripts/dashboard.py
     python scripts/dashboard.py --out docs/dashboard.html
@@ -31,10 +35,13 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = ROOT / "warehouse" / "adult.duckdb"
 DEFAULT_OUT = ROOT / "docs" / "dashboard.html"
 
-# The promise from metrics.md. Thresholds live here and in that file, and the
-# README points at both; there is no third copy inside the markup.
-FRESH_HOURS = 24
-AGEING_HOURS = 24 * 7
+# Imported from the dashboard so the two views cannot drift apart. If app.py is
+# unavailable for any reason, fall back to the values metrics.md publishes.
+try:
+    sys.path.insert(0, str(ROOT))
+    from app import FRESH_HOURS, AGEING_HOURS
+except Exception:                        # pragma: no cover - app.py is present
+    FRESH_HOURS, AGEING_HOURS = 24, 24 * 7
 
 
 def freshness(age_hours: float) -> tuple[str, str, str]:

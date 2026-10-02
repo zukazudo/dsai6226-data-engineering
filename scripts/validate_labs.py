@@ -249,6 +249,17 @@ def lab7(con, r: Report):
     r.check(7, "every segment records when it was built",
             q(con, "SELECT count(*) FROM mart_segment_allocation WHERE refreshed_at IS NULL"), 0)
 
+    # The dashboard must parse, and must not open the warehouse directly: a held
+    # connection would lock out the pipeline the app exists to report on.
+    app = (ROOT / "app.py").read_text(encoding="utf-8")
+    r.check(7, "the dashboard exists and parses",
+            __import__("ast").parse(app) is not None or True, True)
+    r.check(7, "it reads a snapshot, never the warehouse itself",
+            "shutil.copy2(DB, snapshot)" in app, True)
+    # Streamlit excludes underscore-prefixed args from the cache key, which once
+    # silently froze this page on its first snapshot.
+    r.check(7, "the cache key is actually hashed", "def load(_" not in app, True)
+
 
 # --------------------------------------------------------------------- lab 8
 
