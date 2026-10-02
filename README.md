@@ -901,6 +901,139 @@ occupation is not a test-set statistic in any meaningful sense. If this table we
 over a live, growing source, the medians would have to move to a train-only fit. That is
 recorded here so the next person inherits the decision rather than the assumption.
 
+## Lab 9: find it, fix it, prove it
+
+Deliverable: the profiler [`scripts/profile_pipeline.py`](scripts/profile_pipeline.py), the
+table below, and the before and after numbers for the one change that was kept.
+
+```bash
+python scripts/profile_pipeline.py --repeats 3
+```
+
+It builds into a throwaway database, so profiling never disturbs the warehouse anyone is using.
+
+### The profile
+
+Median of three full rebuilds, AMD Ryzen 5 PRO 5650U, 15.3 GB RAM, Windows 11, DuckDB 1.5.5.
+
+| Step | Seconds | Share | Rows in | Rows out |
+|---|---:|---:|---:|---:|
+| schema (DDL) | 0.046 | 1.8% | 0 | 0 |
+| read CSV and hash | 0.285 | 11.2% | 32,561 | 32,561 |
+| stage (anti-join) | 0.333 | 13.1% | 32,561 | 32,561 |
+| validate (10 rules) | 0.053 | 2.1% | 32,561 | 0 |
+| quarantine rows | 0.005 | 0.2% | 0 | 0 |
+| dimension upserts | 0.077 | 3.0% | 32,561 | 0 |
+| **fact load** | **1.544** | **60.5%** | 32,561 | 32,561 |
+| refresh mart | 0.048 | 1.9% | 32,561 | 87 |
+| build features | 0.161 | 6.3% | 32,561 | 32,561 |
+| **total** | **2.552** | | | |
+
+**The bottleneck is the fact load, at 61 per cent.** Nothing else is close: the second slowest
+step is a fifth of its size, so even eliminating every other step entirely could win less than
+40 per cent of the total.
+
+### The profiler had a bug, and the bug changed the answer
+
+The first version grouped statements by label into a dictionary before timing them. That
+silently reordered them: the fact insert mentions `load_reject` in its CTE, so it was grouped
+with the validation statement and therefore ran **before** the dimension upserts it depends on.
+It inserted nothing. The mart and feature steps then measured empty tables, and the profile
+looked entirely plausible:
+
+| | First, buggy profile | Corrected profile |
+|---|---|---|
+| Named bottleneck | stage (anti-join), 30% | fact load, 61% |
+| Total | 1.140 s | 2.552 s |
+
+The wrong answer was not obviously wrong. It identified a real step, gave it a believable
+share, and would have sent the whole lab off to optimise something that was never the problem.
+A profiler that reorders the work is not profiling the work, and statements are now timed in
+file order and never regrouped.
+
+### What the fact load actually spends its time on
+
+Having found the dominant step, the next question is which part of it dominates. Measured by
+rebuilding the warehouse with pieces removed:
+
+| Variant | Fact load |
+|---|---:|
+| as shipped | 1.450 s |
+| without the `UNIQUE` on `record_key` | 1.394 s |
+| without the eight foreign keys | 0.483 s |
+
+**Two thirds of the fact load is foreign key enforcement**, roughly 40 per cent of the whole
+pipeline. Insert timings at three batch sizes confirm it is per row, about 18 microseconds
+each, which for 32,561 rows across eight keys is 260,488 index probes.
+
+**That cost is not being removed.** Lab 6 tried to corrupt this warehouse five ways and three
+of the attempts were refused by these very constraints before any quality check saw them. The
+foreign keys are not overhead that happens to be slow; they are the reason a class of
+corruption cannot occur. Trading them for 40 per cent of a 2.5 second rebuild would be a bad
+bargain, and the honest thing is to say that the dominant cost is one we have chosen to pay.
+
+### Six rewrites that did not work
+
+The dominant step having a cost we keep does not excuse not trying. Each of these was
+implemented, measured against the version it replaced, and reverted:
+
+| Attempted change | Result |
+|---|---|
+| Materialise the fact rows into a temp table, then insert plainly | 4% slower |
+| Drop `UNIQUE` on `record_key`, a 34 character VARCHAR index | 0.056 s, under 4% |
+| Materialise `analytic_person` instead of leaving it a view | 35% slower |
+| Replace `md5()` with the 64-bit `hash()` in the record key | saves 0.017 s, 0.7% |
+| Restrict the duplicate-group scan to hashes in the arriving batch | 2% slower |
+| Restrict `admissible` to the current run's staged rows | 7% slower |
+
+Two of those deserve a sentence, because the reasoning behind them was sound and the
+measurement still said no.
+
+**Materialising the view looked obviously right.** `analytic_person` is an eight-way join read
+by both the mart and the feature build, so it appeared to be doing the same joins twice per
+load. Materialising it cost 35 per cent more: DuckDB inlines and optimises the view into each
+consumer, and paying to write 32,561 rows to disk is worse than letting the planner handle it.
+
+**The incremental scan looked like the clearest defect of all.** Adding 200 rows to the
+warehouse took 1,773 ms against 4,043 ms for the original 32,561, about seventy times the work
+per row, which is exactly Unit 9's description of a step reading far more than it returns. Two
+separate rewrites targeted it. Both were slower, and a diagnostic variant that removed the
+scan **entirely** was also no faster, which settled it: the scan was never the cost. The
+intuition was good, the hypothesis was testable, and the test said no twice.
+
+### The change that was kept
+
+`sql/08_features.sql` computes a per-occupation median of hours and education before building
+the feature rows. It read those three columns through `analytic_person`, the eight-way join
+view, which asked the engine to resolve seven dimension joins whose output is immediately
+discarded, on a second pass over rows the main statement already scans. It now reads
+`fact_person` with the two dimensions that actually supply those columns.
+
+| | Feature build |
+|---|---:|
+| **before**, medians via the 24-column view | **184.1 ms** |
+| **after**, medians via the star and two dimensions | **161.0 ms** |
+| | **12.5% faster** |
+
+Median of five full rebuilds. The fingerprint of `feature_person`, hashed over `person_sk` and
+both derived columns, is identical before and after, so the table is unchanged and only the
+route to it is shorter.
+
+**Why it worked.** Columnar engines read only the columns a query references, and a join is
+only free if its output is never needed. Reading through the view defeated both: the planner
+had to produce the view's shape before the aggregate could discard most of it. Naming the two
+tables that hold the three required columns removed six joins from a pass over 32,561 rows.
+This is Unit 9's first cheap win, select only what you need, applied to a join rather than to a
+column list.
+
+**Why it is small, and why that is the honest headline.** It is 0.9 per cent of the pipeline. A
+12 per cent improvement to a step worth 7 per cent cannot be more. The lab asks for one
+deliberate improvement and this is the one that survived measurement, but the finding worth
+carrying away is the other one: the dominant step is dominated by a correctness guarantee, six
+attempts to make it cheaper all failed, and the only honest report of that is the one that
+shows the failures. Optimisation without measurement is superstition with extra effort, and so
+is optimisation that only publishes the attempts that worked.
+
 ## Reproducing the Lab 1 figures
 
 ```bash
@@ -918,7 +1051,7 @@ notebooks/    exploratory analysis
 presentations/ slide decks
 DATASHEET.md  what this dataset is, and what it is not
 metrics.md    the definition of every published number
-scripts/      the ingester, the quality checks and the dashboard
+scripts/      the ingester, the checks, the dashboard and the profiler
 sql/          schema, quality rules, the serving table and queries
 tests/        fixtures that exercise the reject and quarantine paths
 cloud/        generated CSV export for the sandbox, not committed

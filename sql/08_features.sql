@@ -56,11 +56,22 @@ WITH occ_norms AS (
     -- be stricter, but these are population norms of a 1994 census, not
     -- learned parameters, and the split is assigned from a hash rather than
     -- from anything these values influence.
-    SELECT occupation,
-           median(hours_per_week) AS med_hours,
-           median(education_num)  AS med_education
-    FROM analytic_person
-    GROUP BY occupation
+    -- LAB 9. Read from the star directly rather than through analytic_person.
+    --
+    -- analytic_person is a view over an eight-way join producing 24 columns.
+    -- This CTE needs three of them, so reading it through the view asked the
+    -- engine to resolve seven dimension joins whose output is then discarded,
+    -- and it did so on a second pass over the same rows the main SELECT below
+    -- already scans. Going to fact_person and the two dimensions that actually
+    -- supply these columns cut the feature build from 184 ms to 161 ms, and the
+    -- fingerprint of the resulting table is unchanged.
+    SELECT o.occupation,
+           median(f.hours_per_week) AS med_hours,
+           median(e.education_num)  AS med_education
+    FROM fact_person f
+    JOIN dim_occupation o USING (occupation_sk)
+    JOIN dim_education  e USING (education_sk)
+    GROUP BY o.occupation
 )
 SELECT
     a.person_sk,

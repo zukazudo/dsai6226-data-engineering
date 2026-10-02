@@ -309,11 +309,27 @@ def lab6(r: Report):
     r.check(6, "the suite reports 32 checks", "32 checks" in proc.stdout, True)
 
 
+# --------------------------------------------------------------------- lab 9
+
+def lab9(r: Report):
+    """The profiler runs, names a bottleneck, and keeps its steps in file order."""
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "profile_pipeline.py"), "--repeats", "1"],
+        capture_output=True, text=True)
+    r.check(9, "profiler completes", proc.returncode, 0)
+    out = proc.stdout
+    r.check(9, "it names a bottleneck", "BOTTLENECK:" in out, True)
+    # The ordering bug that made the first profile wrong removed this step
+    # entirely, so its presence is the regression test for that fix.
+    r.check(9, "the fact load is timed, not skipped", "fact load" in out, True)
+    r.check(9, "every stage reports rows", out.count("32,561") >= 4, True)
+
+
 # ------------------------------------------------------------------- reporting
 
 LABS = {1: "data problem statement", 2: "star schema", 3: "re-runnable ingester",
         4: "benchmark", 5: "cloud warehouse", 6: "governance and quality",
-        7: "serving layer", 8: "feature table"}
+        7: "serving layer", 8: "feature table", 9: "optimisation"}
 
 
 def main(argv=None) -> int:
@@ -341,6 +357,7 @@ def main(argv=None) -> int:
     if 3 in wanted: lab3(r)
     if 5 in wanted: lab5(r)
     if 6 in wanted: lab6(r)
+    if 9 in wanted: lab9(r)
     elapsed = time.perf_counter() - started
 
     width = max(len(n) for _, n, _, _, _ in r.rows)
