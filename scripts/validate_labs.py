@@ -250,6 +250,54 @@ def lab7(con, r: Report):
             q(con, "SELECT count(*) FROM mart_segment_allocation WHERE refreshed_at IS NULL"), 0)
 
 
+# --------------------------------------------------------------------- lab 8
+
+def lab8(con, r: Report):
+    """The feature table's honesty claims, which are the whole deliverable."""
+    r.check(8, "one row per person", q(con, "SELECT count(*) FROM feature_person"), 32561)
+
+    # The leakage audit is only real if the columns are actually gone.
+    cols = {d[0] for d in con.execute("SELECT * FROM feature_person LIMIT 0").description}
+    for cut in ["capital_gain", "capital_loss", "fnlwgt", "education",
+                "record_key", "source_file", "source_row", "load_run_id"]:
+        r.check(8, f"{cut} is cut from the feature table", cut in cols, False)
+
+    # Split leakage: a duplicate group on both sides lets the model memorise a
+    # person and then be tested on a copy of them.
+    r.check(8, "no duplicate group straddles the split",
+            q(con, """SELECT count(*) FROM (
+                        SELECT duplicate_group_id FROM feature_person
+                        WHERE duplicate_group_id IS NOT NULL
+                        GROUP BY duplicate_group_id HAVING count(DISTINCT split) > 1)"""), 0)
+
+    r.check(8, "three splits, and only three",
+            q(con, "SELECT count(DISTINCT split) FROM feature_person"), 3)
+
+    # Stratification: every split within one point of the overall base rate.
+    drift = q(con, """SELECT max(abs(rate - (SELECT avg(income_gt_50k::INT) FROM feature_person)))
+                      FROM (SELECT avg(income_gt_50k::INT) AS rate
+                            FROM feature_person GROUP BY split)""")
+    r.check(8, "class balance holds across splits", round(drift, 3) <= 0.01, True)
+
+    # Determinism: re-derive every row's split from the published formula and
+    # confirm it lands where it is stored. A rebuild on any machine, in any
+    # engine, must put the same person in the same place, which is what makes
+    # this reproducible without carrying a seed around.
+    r.check(8, "stored split matches the published formula",
+            q(con, """SELECT count(*) FROM feature_person
+                      WHERE split <> CASE
+                          WHEN abs(hash(coalesce(CAST(duplicate_group_id AS VARCHAR),
+                                                 CAST(person_sk AS VARCHAR))
+                                   || CAST(income_gt_50k AS VARCHAR))) % 100 < 60 THEN 'train'
+                          WHEN abs(hash(coalesce(CAST(duplicate_group_id AS VARCHAR),
+                                                 CAST(person_sk AS VARCHAR))
+                                   || CAST(income_gt_50k AS VARCHAR))) % 100 < 80 THEN 'validate'
+                          ELSE 'test' END"""), 0)
+
+    r.check(8, "every row has a split", q(con,
+            "SELECT count(*) FROM feature_person WHERE split IS NULL"), 0)
+
+
 # --------------------------------------------------------------------- lab 6
 
 def lab6(r: Report):
@@ -265,7 +313,7 @@ def lab6(r: Report):
 
 LABS = {1: "data problem statement", 2: "star schema", 3: "re-runnable ingester",
         4: "benchmark", 5: "cloud warehouse", 6: "governance and quality",
-        7: "serving layer"}
+        7: "serving layer", 8: "feature table"}
 
 
 def main(argv=None) -> int:
@@ -287,6 +335,7 @@ def main(argv=None) -> int:
         if 2 in wanted: lab2(con, r)
         if 4 in wanted: lab4(con, r)
         if 7 in wanted: lab7(con, r)
+        if 8 in wanted: lab8(con, r)
     finally:
         con.close()                      # closed before anything shells out
     if 3 in wanted: lab3(r)

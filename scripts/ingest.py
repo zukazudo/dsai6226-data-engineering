@@ -56,6 +56,9 @@ LOAD_FILE = "03_load.sql"
 # pipeline itself" is true rather than aspirational. It runs after the fact
 # load, not with the DDL, because it reads the rows that load just admitted.
 MART_FILE = "07_mart.sql"
+# Lab 8. The feature table is a pipeline product like any other, so it is
+# rebuilt by the same command. Unit 8: one command rebuilds the feature table.
+FEATURE_FILE = "08_features.sql"
 
 # The 15 source columns, in file order, with the snake_case names used from
 # staging onward. The source uses dots, which must be quoted in every statement
@@ -111,7 +114,7 @@ def apply_ddl(con: duckdb.DuckDBPyConnection) -> None:
 def reset(con: duckdb.DuckDBPyConnection) -> None:
     log.warning("--reset: dropping every table and sequence")
     for t in [
-        "mart_segment_allocation",
+        "mart_segment_allocation", "feature_person",
         "fact_person", "load_reject", "quarantine", "quality_check_result",
         "stg_adult", "load_run",
         "dim_workclass", "dim_education", "dim_marital_status", "dim_occupation",
@@ -212,6 +215,12 @@ def refresh_mart(con: duckdb.DuckDBPyConnection) -> int:
     return con.execute("SELECT count(*) FROM mart_segment_allocation").fetchone()[0]
 
 
+def rebuild_features(con: duckdb.DuckDBPyConnection) -> int:
+    """Rebuild the ML feature table and return its row count."""
+    con.execute((SQL_DIR / FEATURE_FILE).read_text(encoding="utf-8"))
+    return con.execute("SELECT count(*) FROM feature_person").fetchone()[0]
+
+
 def finish_run(con: duckdb.DuckDBPyConnection, run_id: int, counts: dict) -> None:
     con.execute(
         """
@@ -283,6 +292,8 @@ def ingest_file(con: duckdb.DuckDBPyConnection, path: Path) -> dict:
 
         segments = refresh_mart(con)
         log.info("  published %5d segments to mart_segment_allocation", segments)
+        features = rebuild_features(con)
+        log.info("  built     %5d rows of feature_person", features)
 
         log.info("  fact_person now holds %s rows  (%.0f ms)",
                  f"{after:,}", (time.perf_counter() - started) * 1000)

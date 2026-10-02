@@ -776,6 +776,131 @@ switch on; it is a function of the data, so it goes stale on its own and clears 
 `--stale-hours` exists on the script for rehearsing the other thresholds, but the run above
 used none of it.
 
+## Lab 8: build an honest feature table
+
+Deliverable: the feature table [`sql/08_features.sql`](sql/08_features.sql), the split strategy
+below, and [`DATASHEET.md`](DATASHEET.md).
+
+```bash
+python scripts/ingest.py   # rebuilds feature_person, 32,561 rows, 21 columns
+```
+
+Target: `income_gt_50k`. Base rate 24.1 per cent.
+
+### Ten engineered features, each with a story
+
+| Feature | The story |
+|---|---|
+| `age_band` | Earnings rise with age and then plateau. A linear term cannot express a plateau. |
+| `education_num` | The ordered ladder, kept. The education label is dropped: same fact, second spelling. |
+| `education_vs_occupation_median` | Being over-educated for your trade is a different situation from being well educated, and the raw level cannot say which. |
+| `hours_vs_occupation_median` | Forty hours means one thing where the median is 40 and another where it is 25. |
+| `is_full_time` | The part-time boundary is a real employment threshold and carries more than the exact hours either side of it. |
+| `workclass_group` | Nine values collapse to four that behave differently: private, government, self-employed, other. |
+| `is_partnered` | Seven marital states collapse to the one distinction that matters for household income. |
+| `country_is_united_states` | 42 countries with a long tail become the distinction that carries signal, rather than forty categories to memorise. |
+| `occupation_is_assignable` | The `?` handling travels into the model rather than being quietly imputed. |
+| `age_was_censored`, `hours_was_censored` | Unit 8: filling a gap silently teaches the model that gaps never happen. The fact of censoring is a column. |
+
+### The leakage audit, column by column
+
+Unit 8's question is whether a value would have been knowable at the moment the prediction had
+to be made. Four columns failed it, and one failed badly enough to be worth evidence.
+
+**`capital.gain` and `capital.loss` are cut for target leakage.** They are not predictors of
+income above 50,000 dollars; they are a component of the income that defines the answer. The
+data says so plainly:
+
+| `capital_gain` | Records | Above 50K |
+|---|---:|---:|
+| zero | 29,849 | 20.7% |
+| 1 to 999 | 55 | 0.0% |
+| 1,000 to 4,999 | 1,009 | 17.9% |
+| 5,000 to 9,999 | 878 | 84.3% |
+| 10,000 and over | 611 | 97.7% |
+| **top-coded at 99999** | **159** | **100.0%** |
+
+Against a base rate of 24.1 per cent. Above five thousand the column is close to deterministic,
+and at the censored value it is a perfect predictor of 159 records. Unit 8's definition of
+target leakage is a feature that is a disguised copy of the answer, and this is one. Keeping it
+would have produced a model that scores well, learns nothing, and fails the moment it meets a
+population whose income is reported differently.
+
+**`fnlwgt` is cut because it is not a property of the person.** It is the Census Bureau's
+post-stratification weight, derived from known population totals rather than observed from the
+respondent. It encodes demographic information about how people like this one were sampled,
+which is a route for information to enter the model that has nothing to do with the individual
+whose income is being predicted. Lab 1 already established it is not an identifier either:
+21,648 distinct values over 32,561 rows.
+
+**`education` is cut as redundant**, not leaky. It is the same ladder as `education_num` in
+words, and two spellings of one fact adds nothing.
+
+**Pipeline metadata is cut**: `record_key`, `source_file`, `source_row`, `load_run_id` and
+`duplicate_seq` are facts about how the row arrived, not about the person. `person_sk` and
+`duplicate_group_id` stay in the table but are not features. The first exists so a prediction
+can be traced back to a row, a file and a line; the second is what makes the split honest.
+
+**One column survived the audit that deserves a note.** `relationship` overlaps `marital_status`
+heavily, since `Husband` and `Wife` encode both a marital state and a sex. It is kept because
+it also encodes household position, which the other two do not, but anyone reading feature
+importances should know the three columns are entangled.
+
+### The split strategy, written before any modelling
+
+**It is not time-based, and that is forced rather than chosen.** Unit 8 is clear that
+time-ordered data must be split by time. This dataset is a single 1994 snapshot with no date
+column of any kind, so there is no past to train on and no future to be judged against. The
+honest thing is to say so rather than to invent an ordering. This is the same absence Lab 5
+ran into from the other direction: with no date column there is nothing to partition on in
+BigQuery either, which is why our column-pruning saving was three times rather than the
+hundred the lecture quotes. One missing column, two labs, two different consequences.
+
+**It is group-aware, and on this dataset that is the only real leakage risk left.** 47 records
+sit in 23 groups of byte-identical rows, retained deliberately since Lab 2 because nothing
+proves they are errors. If a group straddles the boundary, the model sees the same person in
+training and is tested on a copy of them, which is Unit 8's split leakage exactly: the model
+memorises individuals instead of learning patterns. The hash is therefore taken over
+`duplicate_group_id` where there is one, so every member of a group lands on the same side.
+
+**It is stratified, and deterministic without a seed.** The assignment is
+`hash(group key || target) % 100`, with 0 to 59 train, 60 to 79 validate, 80 to 99 test.
+Hashing is uniform, and applying it within each class of the target preserves the base rate in
+all three parts without a separate stratification step. There is no shuffle and therefore no
+seed to lose: the same rows land in the same places on any machine and in any engine, which is
+a stronger reproducibility guarantee than a recorded seed.
+
+The result:
+
+| Split | Rows | Share | Above 50K |
+|---|---:|---:|---:|
+| train | 19,636 | 60.3% | 23.91% |
+| validate | 6,483 | 19.9% | 24.36% |
+| test | 6,442 | 19.8% | 24.34% |
+| **whole table** | **32,561** | 100% | **24.08%** |
+
+**Duplicate groups straddling a split boundary: 0.** Checked by
+`python scripts/validate_labs.py`, because a property that is only true until someone edits the
+SQL is not a property.
+
+The test set has not been looked at. No model has been trained, which is the cleanest way to
+keep that true, and the split was written down before any of this was built, which is the order
+Unit 8 asks for.
+
+### One compromise, stated rather than buried
+
+`education_vs_occupation_median` and `hours_vs_occupation_median` compare each person against a
+median computed over the **whole** table, not over the training split. Strictly, Unit 8's rule
+against preprocessing before splitting says those medians should be fitted on train only.
+
+The reason it is acceptable here, and the reason it is written down anyway: these are
+population norms of a closed 1994 census extract, not parameters learned from a target, and the
+split is assigned by a hash that nothing about these values influences. The leakage that rule
+guards against is test-set statistics flowing into training, and a median of hours worked per
+occupation is not a test-set statistic in any meaningful sense. If this table were ever rebuilt
+over a live, growing source, the medians would have to move to a train-only fit. That is
+recorded here so the next person inherits the decision rather than the assumption.
+
 ## Reproducing the Lab 1 figures
 
 ```bash
@@ -791,6 +916,7 @@ data/         source data, unmodified
 docs/         lab deliverables and the generated dashboard
 notebooks/    exploratory analysis
 presentations/ slide decks
+DATASHEET.md  what this dataset is, and what it is not
 metrics.md    the definition of every published number
 scripts/      the ingester, the quality checks and the dashboard
 sql/          schema, quality rules, the serving table and queries
