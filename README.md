@@ -666,9 +666,15 @@ Deliverable: the serving table [`sql/07_mart.sql`](sql/07_mart.sql), the definit
 
 ```bash
 python scripts/ingest.py      # publishes mart_segment_allocation, 87 segments
-streamlit run app.py          # the dashboard, on localhost:8501
+python -m streamlit run app.py   # the dashboard, on localhost:8501
 python scripts/dashboard.py   # optional: a static snapshot to docs/dashboard.html
 ```
+
+Run it through `python -m` rather than the bare `streamlit` command. pip installs a
+`streamlit.exe` into the interpreter's Scripts directory, and on a default Windows Python that
+directory is frequently not on PATH, so `streamlit run app.py` reports that it is not
+recognised even though the package is installed and working. `python -m streamlit` uses the
+interpreter that is already running and needs no PATH entry.
 
 The dashboard is a Streamlit app. The HTML export is not a second dashboard: it renders the
 same table for the cases the app cannot cover, such as attaching a dated snapshot to a

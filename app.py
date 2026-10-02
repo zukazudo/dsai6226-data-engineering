@@ -4,7 +4,13 @@ Lab 7: the consumer view over mart_segment_allocation.
 One screen answering one question: where in the eligible pool are the
 candidates, and which of those segments can actually carry a decision?
 
-    streamlit run app.py
+    python -m streamlit run app.py
+
+Run it through the module rather than the bare `streamlit` command. pip
+installs a streamlit.exe into the interpreter's Scripts directory, and on a
+default Windows Python that directory is often not on PATH, so `streamlit run`
+reports that it is not recognised while the package is installed and working.
+`python -m` uses the interpreter you already have.
 
 It reads only the serving table and computes no metric of its own. Every figure
 on the page is a column defined in metrics.md and computed in sql/07_mart.sql,

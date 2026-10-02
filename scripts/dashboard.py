@@ -1,7 +1,7 @@
 """
 Lab 7: a static export of the consumer view.
 
-The dashboard is app.py, run with `streamlit run app.py`. This script renders
+The dashboard is app.py, run with `python -m streamlit run app.py`. This renders
 the same serving table to a single HTML file for the cases the app cannot
 cover: reading it without a Python environment, attaching it to a submission,
 or committing a dated snapshot of what the numbers were on a given day.
